@@ -62,7 +62,48 @@ stages:
     pre:
     - type: auto
     fail-fast: false
-
+  stage3:
+    name: UT
+    select: selected_by_default
+    jobs:
+      JOB_st_test:
+        name: ST_test
+        steps:
+          - name: Checkout
+            identifier: process_checkout
+            uses: checkout
+            with:
+              ref: ${{ atomgit.event.pull_request.merge_commit_sha }}
+              allow-unsafe-pr-checkout: true
+          - name: download
+            uses: obs-download
+            with:
+              endpoint: "https://obs.cn-north-4.myhuaweicloud.com"
+              bucket: "ascend-ci"
+              access-key: ${{ secrets.AK }}
+              secret-key: ${{ secrets.SK }}
+              key: |
+                ${{ env.obs_path }}/pr_filelist.txt
+                ${{ env.obs_path }}/pr_filelist_mod.txt
+                ${{ env.obs_path }}/update_file_detail.txt
+              path: ${{ steps.process_checkout.outputs.path }}
+          - name: run_st_test
+            run: |
+              bash ${WORKSPACE}/.gitcode/scripts/ut.sh
+              ret=$?
+              if [ $ret -eq 0 ]; then
+                  echo "SUCCESS: ut.sh exited with 0"
+              else
+                  echo "FAILED: ut.sh exited with $ret"
+                  exit 1
+              fi
+        if: "${{ default() }}"
+        runs-on:
+          - self-hosted
+          - runner_name=tilelang_ut
+    pre:
+    - type: auto
+    fail-fast: false
 
 post:
   jobs:
