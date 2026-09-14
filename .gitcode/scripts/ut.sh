@@ -11,12 +11,19 @@
 # Optional overrides:
 #   DEVICE_ID=0 PYTEST_WORKERS=4 bash scripts/ut.sh
 #   bash scripts/ut.sh tests/quant/test_swiglu_forward.py -k case_name
+#
+# Benchmark regression mode (opt-in): TK_RUN_BENCHMARK=1 runs only the
+# benchmark-marked cases (--run-benchmark) once, with 1 worker on the
+# default backend, comparing against tests/benchmark_baselines/
+# (comparison only; never refreshes baselines). Targets follow the same
+# selection rules as functional tests (args > pr_filelist > tests/).
+#   TK_RUN_BENCHMARK=1 bash scripts/ut.sh tests
 
 set -Eeo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 CONDA_ENV="${CONDA_ENV:-tl_tilelang0909ci}"
-DEVICE_ID="${DEVICE_ID:-${ASCEND_RT_VISIBLE_DEVICES:-2}}"
+DEVICE_ID="${DEVICE_ID:-${ASCEND_RT_VISIBLE_DEVICES:-3}}"
 PYTEST_WORKERS="${PYTEST_WORKERS:-2}"
 PR_FILELIST="${PR_FILELIST:-${ROOT_DIR}/pr_filelist.txt}"
 CPLUS_INCLUDE_PATH="${CPLUS_INCLUDE_PATH:-/usr/include/c++/11:/usr/include/x86_64-linux-gnu/c++/11:/usr/include/c++/11/backward}"
@@ -84,15 +91,39 @@ else
     pytest_targets=(tests)
 fi
 
+# Benchmark regression mode: mirrors scripts/run_test.sh's TK_RUN_BENCHMARK
+# branch — single pytest invocation, 1 worker (timing must not share the
+# device), default backend (no TILELANG_DEFAULT_TARGET export, so auto and
+# pto never compare against the same baseline). Exit 5 ("no tests
+# collected") is tolerated, e.g. when the incremental scope has no
+# benchmark cases; any regression makes pytest exit non-zero, which is
+# propagated to CI.
+if [[ "${TK_RUN_BENCHMARK:-0}" == "1" ]]; then
+    echo ">>> Benchmark regression on NPU ${ASCEND_RT_VISIBLE_DEVICES} (1 worker, default backend)"
+    rc=0
+    pytest "${pytest_targets[@]}" -v \
+        -n 1 \
+        --dist load \
+        -m "benchmark" \
+        --run-benchmark \
+        --benchmark-regression-threshold 0.10 \
+        --benchmark-min-delta-us 1.0 || rc=$?
+    if (( rc == 5 )); then
+        echo "No benchmark case collected in the given scope, skip."
+        rc=0
+    fi
+    exit "${rc}"
+fi
+
 run_pytest_for_target() {
     local target="$1"
     export TILELANG_DEFAULT_TARGET="${target}"
     echo ""
     echo ">>> Running pytest with TILELANG_DEFAULT_TARGET=${TILELANG_DEFAULT_TARGET}"
-    pytest "${pytest_targets[@]}" \
+    pytest "${pytest_targets[@]}" -v \
         -n "${PYTEST_WORKERS}" \
         --dist load \
-        -m "not large_gpu_mem and not benchmark"
+        -m "not benchmark"
 }
 
 UT_TARGETS="${UT_TARGETS:-auto pto}"
