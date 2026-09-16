@@ -1,0 +1,35 @@
+name: Nightly_ops-tilelang
+
+concurrency:
+  max: 1
+  exceed-action: QUEUE
+  enable: true
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '20 2 * * *'    # UTC解读=北京10:20; 本地解读=北京02:20
+
+stages:
+  stage1:
+    name: NightlyUT
+    jobs:
+      JOB_ut_full:
+        name: UT_full
+        steps:
+          - name: Checkout
+            identifier: process_checkout
+            uses: checkout
+          - name: run_ut_full
+            run: |
+              bash ${WORKSPACE}/.gitcode/scripts/ut.sh tests
+              ret=$?
+              if [ $ret -eq 0 ]; then
+                  echo "SUCCESS: ut.sh exited with 0"
+              else
+                  echo "FAILED: ut.sh exited with $ret"
+                  exit 1
+              fi
+        runs-on:
+          - self-hosted
+          - runner_name=tilelang_ut
