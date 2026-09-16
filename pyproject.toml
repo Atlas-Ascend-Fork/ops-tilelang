@@ -1,0 +1,73 @@
+[build-system]
+requires = ["setuptools>=68", "wheel", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ops-tilelang"
+dynamic = ["version"]
+description = "High-performance Ascend operators built with TileLang."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{name = "ops-tilelang contributors"}]
+dependencies = [
+  "torch>=2.1",
+  "tilelang>=0.1.9",
+]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.optional-dependencies]
+dev = [
+  "build>=1.2",
+  "setuptools>=68",
+  "setuptools-scm>=8",
+  "wheel",
+  "pytest>=8",
+  "pytest-xdist>=3",
+  "ruff>=0.12",
+  "pre-commit>=4",
+]
+
+[project.urls]
+Homepage = "https://gitee.com/ascend/ops-tilelang"
+Repository = "https://gitee.com/ascend/ops-tilelang"
+Issues = "https://gitee.com/ascend/ops-tilelang/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["cann_ops_tilelang*"]
+
+[tool.setuptools_scm]
+version_file = "src/cann_ops_tilelang/_version.py"
+fallback_version = "0.1.0.dev0"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--strict-markers", "-ra"]
+markers = [
+  "npu: requires an Ascend NPU runtime",
+  "benchmark: performance test, disabled unless --run-benchmark is passed",
+  "large_npu_mem: high or unknown peak NPU memory; run with fewer workers",
+]
+filterwarnings = [
+  "ignore:.*owner does not match the current owner.*:UserWarning",
+  "ignore:.*Permission mismatch.*does not match.*:UserWarning",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.format]
+quote-style = "single"

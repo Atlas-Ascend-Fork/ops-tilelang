@@ -1,0 +1,10 @@
+repos:
+  - repo: https://gitcode.com/gh_mirrors/ru/ruff-pre-commit
+    rev: v0.14.14
+    hooks:
+      - id: ruff-check
+        args: ["--output-format", "github", "--fix"]
+        types: [python]
+      - id: ruff-format
+        types: [python]
+

@@ -1,0 +1,20 @@
+{
+  "engram/test_engram_fused_weight.py::test_engram_fused_weight[hc=4,hidden=2048,]": {
+    "peak_npu_mb": 32.1
+  },
+  "engram/test_engram_fused_weight.py::test_engram_fused_weight[hc=4,hidden=2560,]": {
+    "peak_npu_mb": 32.1
+  },
+  "engram/test_engram_fused_weight.py::test_engram_fused_weight[hc=4,hidden=3072,]": {
+    "peak_npu_mb": 32.1
+  },
+  "engram/test_engram_fused_weight.py::test_engram_fused_weight[hc=4,hidden=4096,]": {
+    "peak_npu_mb": 32.1
+  },
+  "engram/test_engram_fused_weight.py::test_engram_fused_weight[hc=4,hidden=6144,]": {
+    "peak_npu_mb": 32.2
+  },
+  "engram/test_engram_fused_weight.py::test_engram_fused_weight[hc=4,hidden=7168,]": {
+    "peak_npu_mb": 32.2
+  }
+}

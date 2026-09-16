@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+build/
+dist/
+.venv/
+venv/
+.tilelang/
+*.log
+src/cann_ops_tilelang/_version.py
+.claude/
+.opencode/

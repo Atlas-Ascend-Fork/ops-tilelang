@@ -1,0 +1,6 @@
+{"kernel": "engram_grad_w_reduce", "operation": "fwd", "params": {"hidden": 2048, "num_partials": 30}, "param_id": "hidden=2048,num_partials=30,", "cluster": "a5", "time_us": 2.15, "bandwidth_gbs": 503.2415}
+{"kernel": "engram_grad_w_reduce", "operation": "fwd", "params": {"hidden": 2560, "num_partials": 30}, "param_id": "hidden=2560,num_partials=30,", "cluster": "a5", "time_us": 2.33, "bandwidth_gbs": 581.0937}
+{"kernel": "engram_grad_w_reduce", "operation": "fwd", "params": {"hidden": 3072, "num_partials": 30}, "param_id": "hidden=3072,num_partials=30,", "cluster": "a5", "time_us": 2.33, "bandwidth_gbs": 695.5042}
+{"kernel": "engram_grad_w_reduce", "operation": "fwd", "params": {"hidden": 4096, "num_partials": 30}, "param_id": "hidden=4096,num_partials=30,", "cluster": "a5", "time_us": 2.58, "bandwidth_gbs": 836.9596}
+{"kernel": "engram_grad_w_reduce", "operation": "fwd", "params": {"hidden": 6144, "num_partials": 30}, "param_id": "hidden=6144,num_partials=30,", "cluster": "a5", "time_us": 2.83, "bandwidth_gbs": 1148.1818}
+{"kernel": "engram_grad_w_reduce", "operation": "fwd", "params": {"hidden": 7168, "num_partials": 30}, "param_id": "hidden=7168,num_partials=30,", "cluster": "a5", "time_us": 2.87, "bandwidth_gbs": 1319.1494}

@@ -1,0 +1,38 @@
+{
+  "engram/test_engram_gate_bwd.py::test_engram_gate_bwd[num_tokens=512,hc=4,hidden=2048,]": {
+    "peak_npu_mb": 198.2
+  },
+  "engram/test_engram_gate_bwd.py::test_engram_gate_bwd[num_tokens=512,hc=4,hidden=2560,]": {
+    "peak_npu_mb": 243.8
+  },
+  "engram/test_engram_gate_bwd.py::test_engram_gate_bwd[num_tokens=512,hc=4,hidden=3072,]": {
+    "peak_npu_mb": 290.3
+  },
+  "engram/test_engram_gate_bwd.py::test_engram_gate_bwd[num_tokens=512,hc=4,hidden=4096,]": {
+    "peak_npu_mb": 380.4
+  },
+  "engram/test_engram_gate_bwd.py::test_engram_gate_bwd[num_tokens=512,hc=4,hidden=6144,]": {
+    "peak_npu_mb": 562.6
+  },
+  "engram/test_engram_gate_bwd.py::test_engram_gate_bwd[num_tokens=512,hc=4,hidden=7168,]": {
+    "peak_npu_mb": 653.7
+  },
+  "engram/test_engram_gate_bwd.py::test_engram_gate_bwd[num_tokens=8001,hc=4,hidden=2048,]": {
+    "peak_npu_mb": 2861.9
+  },
+  "engram/test_engram_gate_bwd.py::test_engram_gate_bwd[num_tokens=8001,hc=4,hidden=2560,]": {
+    "peak_npu_mb": 3572.0
+  },
+  "engram/test_engram_gate_bwd.py::test_engram_gate_bwd[num_tokens=8001,hc=4,hidden=3072,]": {
+    "peak_npu_mb": 4288.3
+  },
+  "engram/test_engram_gate_bwd.py::test_engram_gate_bwd[num_tokens=8001,hc=4,hidden=4096,]": {
+    "peak_npu_mb": 5705.2
+  },
+  "engram/test_engram_gate_bwd.py::test_engram_gate_bwd[num_tokens=8001,hc=4,hidden=6144,]": {
+    "peak_npu_mb": 8550.4
+  },
+  "engram/test_engram_gate_bwd.py::test_engram_gate_bwd[num_tokens=8001,hc=4,hidden=7168,]": {
+    "peak_npu_mb": 9976.5
+  }
+}

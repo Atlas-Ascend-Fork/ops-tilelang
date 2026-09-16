@@ -1,0 +1,6 @@
+{"kernel": "engram_fused_weight", "operation": "fwd", "params": {"hc": 4, "hidden": 2048}, "param_id": "hc=4,hidden=2048,", "cluster": "a5", "time_us": 1.3, "bandwidth_gbs": 50.4918}
+{"kernel": "engram_fused_weight", "operation": "fwd", "params": {"hc": 4, "hidden": 2560}, "param_id": "hc=4,hidden=2560,", "cluster": "a5", "time_us": 1.34, "bandwidth_gbs": 61.0272}
+{"kernel": "engram_fused_weight", "operation": "fwd", "params": {"hc": 4, "hidden": 3072}, "param_id": "hc=4,hidden=3072,", "cluster": "a5", "time_us": 1.37, "bandwidth_gbs": 71.5441}
+{"kernel": "engram_fused_weight", "operation": "fwd", "params": {"hc": 4, "hidden": 4096}, "param_id": "hc=4,hidden=4096,", "cluster": "a5", "time_us": 1.35, "bandwidth_gbs": 96.766}
+{"kernel": "engram_fused_weight", "operation": "fwd", "params": {"hc": 4, "hidden": 6144}, "param_id": "hc=4,hidden=6144,", "cluster": "a5", "time_us": 1.39, "bandwidth_gbs": 141.5132}
+{"kernel": "engram_fused_weight", "operation": "fwd", "params": {"hc": 4, "hidden": 7168}, "param_id": "hc=4,hidden=7168,", "cluster": "a5", "time_us": 1.4, "bandwidth_gbs": 163.8539}
