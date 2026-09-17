@@ -4,7 +4,7 @@
 
 > **硬件支持范围**：本代码仓仅支持 Ascend A5 及以上架构，不保证在更早的 Ascend 架构上可编译或正确运行。
 
-当前仓库提供基础工程框架：Engram 算子族包含 `engram_fused_weight`、`engram_gate_fwd`、`engram_gate_bwd` 和 `engram_grad_w_reduce`，覆盖前向、反向及分片梯度归并。所有算子均接入分级参数生成、确定性随机种子、NPU 显存画像、A5 性能基线、正则筛选、xdist 多卡绑定以及分阶段测试调度。
+当前仓库提供基础工程框架：Engram 算子族包含 `engram_fused_weight`、`engram_gate_fwd`、`engram_gate_bwd`、`engram_grad_w_reduce` 和 `engram_sinkhorn_step`，覆盖前向、反向、分片梯度归并及 Sinkhorn 行归一化。所有算子均接入分级参数生成、确定性随机种子、NPU 显存画像、A5 性能回归框架、正则筛选、xdist 多卡绑定以及分阶段测试调度。
 
 ## 设计原则
 
@@ -101,6 +101,19 @@ engram_grad_w_reduce(
     grad_w_partial, weight_hidden, weight_embed, grad_weight_hidden, grad_weight_embed
 )
 ```
+
+`engram_sinkhorn_step` 对二维 FP32 矩阵执行一次 Sinkhorn 行归一化，并原地更新行缩放系数：
+
+```python
+from cann_ops_tilelang import engram_sinkhorn_step
+
+matrix = torch.randn((1001, 256), dtype=torch.float32, device='npu')
+row_scale = torch.rand((1001,), dtype=torch.float32, device='npu')
+col_scale = torch.rand((256,), dtype=torch.float32, device='npu')
+row_norm, col_sumsq = engram_sinkhorn_step(matrix, row_scale, col_scale, eps=1e-20)
+```
+
+三个输入必须位于同一 NPU、连续且为 FP32，并且不能共享存储。`matrix` 的形状为 `(num_rows, head_dim)`，`head_dim` 必须是正的 256 倍数；调用方需保证 `row_scale` 包含非负的 Sinkhorn 缩放系数。已验证的典型维度为 256 和 5120。由于 `SimtVF` 需预留线程上下文，wrapper 会拒绝共享 UB 估算超过 216 KiB 的 shape。`num_rows=0` 时返回空的 `row_norm` 和全零的 `col_sumsq`。
 
 ## 测试
 
