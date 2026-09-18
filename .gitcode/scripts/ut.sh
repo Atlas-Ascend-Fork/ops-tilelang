@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 
-# Run regular TileKernels pytest cases on one device, on both Ascend codegen
-# backends: "auto" (default, AscendC) then "pto" (PTO codegen). Override the
-# backend list with UT_TARGETS, e.g. UT_TARGETS="auto" or UT_TARGETS="pto".
+# Run regular TileKernels pytest cases on one or more devices (xdist workers
+# are bound round-robin to the device list by tests/conftest.py), on both
+# Ascend codegen backends: "auto" (default, AscendC) then "pto" (PTO codegen).
+# Override the backend list with UT_TARGETS, e.g. UT_TARGETS="auto" or
+# UT_TARGETS="pto".
 #
 # Incremental mode (default when pr_filelist.txt exists): run changed
 # pytest files directly and map changed operator sources to their pytest files;
@@ -11,7 +13,7 @@
 # with OPERATOR_TEST_MAP. Rules are loaded once in incremental mode.
 #
 # Optional overrides:
-#   DEVICE_ID=0 PYTEST_WORKERS=4 bash scripts/ut.sh
+#   DEVICE_ID=1,3 PYTEST_WORKERS=8 bash scripts/ut.sh
 #   bash scripts/ut.sh tests/quant/test_swiglu_forward.py -k case_name
 #
 # Benchmark regression mode (opt-in): TK_RUN_BENCHMARK=1 runs only the
@@ -25,8 +27,8 @@ set -Eeo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 CONDA_ENV="${CONDA_ENV:-tl_tilelang0917ci}"
-DEVICE_ID="${DEVICE_ID:-${ASCEND_RT_VISIBLE_DEVICES:-3}}"
-PYTEST_WORKERS="${PYTEST_WORKERS:-2}"
+DEVICE_ID="${DEVICE_ID:-${ASCEND_RT_VISIBLE_DEVICES:-1,3}}"
+PYTEST_WORKERS="${PYTEST_WORKERS:-8}"
 PR_FILELIST="${PR_FILELIST:-${ROOT_DIR}/pr_filelist.txt}"
 OPERATOR_TEST_MAP="${OPERATOR_TEST_MAP:-${ROOT_DIR}/.gitcode/config/operator_tests.conf}"
 CPLUS_INCLUDE_PATH="${CPLUS_INCLUDE_PATH:-/usr/include/c++/11:/usr/include/x86_64-linux-gnu/c++/11:/usr/include/c++/11/backward}"
@@ -36,8 +38,8 @@ if [[ ! "${PYTEST_WORKERS}" =~ ^[1-9][0-9]*$ ]]; then
     exit 2
 fi
 
-if [[ -z "${DEVICE_ID}" || "${DEVICE_ID}" == *,* ]]; then
-    echo "DEVICE_ID must select exactly one device, got: ${DEVICE_ID}" >&2
+if [[ -z "${DEVICE_ID}" || ! "${DEVICE_ID}" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+    echo "DEVICE_ID must be one or more comma-separated device ids, got: ${DEVICE_ID}" >&2
     exit 2
 fi
 

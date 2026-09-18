@@ -22,7 +22,8 @@ stages:
             uses: checkout
           - name: run_ut_full
             run: |
-              bash ${WORKSPACE}/.gitcode/scripts/ut.sh tests
+              # OPS_TILELANG_TEST_LEVEL: 0=core, 1=default, 2=full; nightly only runs L0.
+              OPS_TILELANG_TEST_LEVEL=0 bash ${WORKSPACE}/.gitcode/scripts/ut.sh tests
               ret=$?
               if [ $ret -eq 0 ]; then
                   echo "SUCCESS: ut.sh exited with 0"
