@@ -1,7 +1,3 @@
-"""Pure PyTorch reference for the Engram gate operator."""
-
-from __future__ import annotations
-
 import torch
 
 
@@ -14,34 +10,47 @@ def engram_gate_ref(
     eps: float,
     save_for_backward: bool = False,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Compute the Engram gate with eager PyTorch operations.
+    """Pure PyTorch reference implementation of engram gate (vectorized, supports autograd).
 
-    This implementation is intentionally device-agnostic and supports
-    autograd, making it the numerical oracle for both forward and backward
-    TileLang kernels.
+    Computes: output = x + sigmoid(signed_sqrt(dot(RMSNorm(x, wh), RMSNorm(k, we)) * scalar)) * v
+
+    Args:
+        hidden_states: Input of shape (num_tokens, hc_mult, hidden_size), bfloat16.
+        kv: Packed key/value embeddings of shape (num_tokens, (hc_mult + 1) * hidden_size), bfloat16.
+        weight_hidden: RMSNorm weight for hidden states, shape (hc_mult, hidden_size), bfloat16.
+        weight_embed: RMSNorm weight for key embeddings, shape (hc_mult, hidden_size), bfloat16.
+        clamp_value: Clamp threshold for signed-sqrt gate activation.
+        eps: Epsilon for RMSNorm numerical stability.
+        save_for_backward: If True, also return (dot, gate_score, rstd_x, rstd_k).
+
+    Returns:
+        If save_for_backward is False: output tensor of shape (num_tokens, hc_mult, hidden_size), bfloat16.
+        If save_for_backward is True: tuple of (output, dot, gate_score, rstd_x, rstd_k).
     """
-
     num_tokens, hc_mult, hidden_size = hidden_states.shape
     scalar = hidden_size**-0.5
+
     k, v = kv.split([hc_mult * hidden_size, hidden_size], dim=-1)
     k = k.view(num_tokens, hc_mult, hidden_size)
 
     x = hidden_states.float()
-    k_float = k.float()
-    weight_hidden_float = weight_hidden.float().unsqueeze(0)
-    weight_embed_float = weight_embed.float().unsqueeze(0)
+    k_f = k.float()
+    wh = weight_hidden.float().unsqueeze(0)
+    we = weight_embed.float().unsqueeze(0)
 
-    rstd_x = torch.rsqrt(x.square().mean(-1) + eps)
-    rstd_k = torch.rsqrt(k_float.square().mean(-1) + eps)
-    raw_dot = torch.einsum(
-        '...d,...d->...',
-        x * weight_hidden_float,
-        k_float * weight_embed_float,
-    )
-    normalized_dot = raw_dot * rstd_x * rstd_k * scalar
-    signed_sqrt = normalized_dot.abs().clamp_min(clamp_value).sqrt() * normalized_dot.sign()
+    # RMSNorm
+    rstd_x = torch.rsqrt(x.pow(2).mean(-1) + eps)
+    rstd_k = torch.rsqrt(k_f.pow(2).mean(-1) + eps)
+
+    # Dot -> sqrt-gate -> sigmoid
+    # raw_dot is the unnormalized sum(x * wh * k * we), matching the kernel's dot_out
+    raw_dot = torch.einsum('...d,...d->...', x * wh, k_f * we)
+    dot = raw_dot * rstd_x * rstd_k * scalar
+    signed_sqrt = dot.abs().clamp_min(clamp_value).sqrt() * dot.sign()
     gate_score = signed_sqrt.sigmoid()
-    output = (x + gate_score.unsqueeze(-1) * v.unsqueeze(-2)).bfloat16()
+
+    output = x + gate_score.unsqueeze(-1) * v.unsqueeze(-2)
+    output = output.bfloat16()
 
     if save_for_backward:
         return output, raw_dot, gate_score, rstd_x, rstd_k

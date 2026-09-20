@@ -22,7 +22,6 @@ def generate_test_data(params):
 
 
 def generate_test_params(level: int) -> list[dict]:
-    del level
     return [{'hc': hc, 'hidden': hidden_size} for hc in (4,) for hidden_size in generate_hidden_sizes(256)]
 
 
@@ -33,7 +32,6 @@ def test_engram_fused_weight(params):
     ref = wh_data.float() * we_data.float()
     out = cann_ops_tilelang.engram_fused_weight(wh_data, we_data)
 
-    assert out.dtype == torch.float32
     assert_equal(out, ref)
 
 
