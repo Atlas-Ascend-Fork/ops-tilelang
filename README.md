@@ -4,7 +4,7 @@
 
 > **硬件支持范围**：本代码仓仅支持 Ascend A5 及以上架构，不保证在更早的 Ascend 架构上可编译或正确运行。
 
-当前仓库提供基础工程框架：Engram 算子族包含 `engram_fused_weight`、`engram_gate_fwd`、`engram_gate_bwd`、`engram_grad_w_reduce` 和 `engram_sinkhorn_step`，覆盖前向、反向、分片梯度归并及 Sinkhorn 行归一化。所有算子均接入分级参数生成、确定性随机种子、NPU 显存画像、A5 性能回归框架、正则筛选、xdist 多卡绑定以及分阶段测试调度。
+当前仓库提供基础工程框架：Engram 算子族覆盖前向、反向、分片梯度归并及 Sinkhorn 行归一化；MoE 算子族提供 `topk_gate`、`moe_topk_gate` 和 `normalize_weight`。算子测试接入分级参数生成、确定性随机种子、NPU 显存画像、A5 性能回归框架、正则筛选、xdist 多卡绑定以及分阶段测试调度。
 
 ## 设计原则
 
@@ -21,11 +21,13 @@ ops-tilelang/
 ├── src/cann_ops_tilelang/
 │   ├── config.py                    # Ascend 环境与运行配置
 │   ├── utils.py                     # 通用纯 Python 工具
-│   └── engram/                       # Engram 前向、反向和梯度归并算子
+│   ├── engram/                       # Engram 前向、反向和梯度归并算子
+│   └── moe/                          # MoE 路由和权重归一化算子
 ├── tests/
 │   ├── testing/                      # 参数生成、数值断言和 benchmark 工具
 │   ├── pytest_*_plugin.py            # benchmark/显存/seed/xdist/warning 插件
-│   └── engram/                       # 算子测试、PyTorch reference、benchmark 与显存画像
+│   ├── engram/                       # Engram 测试与 PyTorch reference
+│   └── moe/                          # MoE 测试与 PyTorch reference
 ├── docs/                            # 架构和新增算子指南
 ├── scripts/                         # 本地/CI 执行入口
 └── pyproject.toml                   # 构建、依赖和工具配置
@@ -115,6 +117,24 @@ row_norm, col_sumsq = engram_sinkhorn_step(matrix, row_scale, col_scale, eps=1e-
 
 三个输入必须位于同一 NPU、连续且为 FP32，并且不能共享存储。`matrix` 的形状为 `(num_rows, head_dim)`，`head_dim` 必须是正的 256 倍数；调用方需保证 `row_scale` 包含非负的 Sinkhorn 缩放系数。已验证的典型维度为 256 和 5120。由于 `SimtVF` 需预留线程上下文，wrapper 会拒绝共享 UB 估算超过 216 KiB 的 shape。`num_rows=0` 时返回空的 `row_norm` 和全零的 `col_sumsq`。
 
+MoE 路由算子接收连续的 NPU FP32 分数。`topk_gate` 稳定选择每个 token 的专家索引，分数相同时选择较小索引；`moe_topk_gate` 融合打分、偏置、掩码、固定路由、随机路由和逻辑到物理专家映射；`normalize_weight` 返回每行分母及归一化权重：
+
+```python
+from cann_ops_tilelang import moe_topk_gate, normalize_weight, topk_gate
+
+topk_idx = topk_gate(scores, num_topk=6)
+denominator, normalized_weights = normalize_weight(topk_weights)
+topk_idx, topk_weights = moe_topk_gate(
+    logits,
+    num_topk=6,
+    use_shared_as_routed=False,
+    num_shared_experts=1,
+    routed_scaling_factor=1.0,
+    ep_rank=0,
+    scoring_func='sigmoid',
+)
+```
+
 ## 测试
 
 ```bash
@@ -134,6 +154,11 @@ pytest tests/engram/test_engram_fused_weight.py -m 'not benchmark' --refresh-mem
 # 刷新整个 Engram 算子族
 pytest tests/engram -m benchmark --run-benchmark --refresh-baseline
 pytest tests/engram -m 'not benchmark' --refresh-mem
+
+# 运行或刷新 MoE 算子族
+pytest tests/moe -m 'npu and not benchmark'
+pytest tests/moe -m benchmark --run-benchmark --refresh-baseline
+pytest tests/moe -m 'not benchmark' --refresh-mem
 
 # 标准入口
 ./scripts/run_test.sh
