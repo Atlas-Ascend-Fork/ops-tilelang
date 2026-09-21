@@ -6,7 +6,7 @@ import math
 from numbers import Real
 
 import torch
-from tilelang import language as T
+from tilelang.ascend import language as T
 
 from cann_ops_tilelang.config import get_num_vector_cores, require_ascend, should_print_kernel_source
 

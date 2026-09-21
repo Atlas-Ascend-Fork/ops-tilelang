@@ -7,8 +7,8 @@ small, regular UB working set.
 """
 
 import tilelang
-from tilelang import language as T
-from tilelang.language import simd as S
+from tilelang.ascend import language as T
+from tilelang.ascend.language import simd as S
 
 _VEC = 64  # fp32 lanes in one 2048-bit Ascend vector register
 

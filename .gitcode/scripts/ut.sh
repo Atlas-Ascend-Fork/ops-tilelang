@@ -26,7 +26,7 @@
 set -Eeo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
-CONDA_ENV="${CONDA_ENV:-tl_tilelang0917ci}"
+CONDA_ENV="${CONDA_ENV:-tl_tilelang0920ci}"
 DEVICE_ID="${DEVICE_ID:-${ASCEND_RT_VISIBLE_DEVICES:-1,3}}"
 PYTEST_WORKERS="${PYTEST_WORKERS:-8}"
 PR_FILELIST="${PR_FILELIST:-${ROOT_DIR}/pr_filelist.txt}"
@@ -45,7 +45,7 @@ fi
 
 source /root/miniconda3/etc/profile.d/conda.sh
 conda activate "${CONDA_ENV}"
-source /home/tilelangci/weekly0917/cann/set_env.sh
+source /data/z00520135/weekly0920/cann/set_env.sh
 
 cd "${ROOT_DIR}"
 

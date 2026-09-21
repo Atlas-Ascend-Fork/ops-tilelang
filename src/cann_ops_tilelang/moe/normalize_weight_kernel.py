@@ -1,5 +1,5 @@
 import tilelang
-from tilelang import language as T
+from tilelang.ascend import language as T
 
 from cann_ops_tilelang.config import get_num_vector_cores
 

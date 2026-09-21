@@ -1,8 +1,8 @@
 """TileLang Ascend kernels for the Engram Sinkhorn operator family."""
 
 import tilelang
-from tilelang import language as T
-from tilelang.language import simd as S
+from tilelang.ascend import language as T
+from tilelang.ascend.language import simd as S
 
 
 @tilelang.jit
