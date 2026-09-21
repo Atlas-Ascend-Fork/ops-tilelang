@@ -89,7 +89,7 @@ stages:
               path: ${{ steps.process_checkout.outputs.path }}
           - name: run_st_test
             run: |
-              bash ${WORKSPACE}/.gitcode/scripts/ut.sh
+              OPS_TILELANG_TEST_LEVEL=0 bash ${WORKSPACE}/.gitcode/scripts/ut.sh
               ret=$?
               if [ $ret -eq 0 ]; then
                   echo "SUCCESS: ut.sh exited with 0"
