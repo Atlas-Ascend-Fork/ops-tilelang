@@ -94,6 +94,32 @@ engram_fused_weight(weight_hidden, weight_embed)
   -> update grad_weight_hidden and grad_weight_embed in place
 ```
 
+MHC 训练链路由显式前向和反向原语组成：
+
+```text
+expand_to_mhc_forward(...)
+  -> mhc_fn_normw_merge_forward(...)
+  -> mhc_gemm_with_sqrsum_forward(...)
+  -> mhc_reduce_partials_and_rmsnorm_forward(...)
+  -> mhc_pre_split_mixes_forward(...)
+  -> mhc_sinkhorn_forward(...)
+  -> mhc_pre_apply_mix_forward(...)
+  -> upper-layer computation
+  -> mhc_post_forward(...)
+
+mhc_post_backward(...)
+  -> upper-layer backward
+  -> mhc_pre_apply_mix_backward(...)
+  -> mhc_sinkhorn_backward(...)
+  -> mhc_pre_split_mixes_backward(...)
+  -> mhc_reduce_partials_and_rmsnorm_backward(...)
+  -> mhc_gemm_with_sqrsum_backward(...)
+  -> mhc_fn_normw_merge_backward(...)
+  -> expand_to_mhc_backward(...)
+```
+
+`mhc_head_compute_mix_forward` 和 `mhc_head_compute_mix_backward` 处理 head mixing 系数，`mhc_multilayer_recompute` 融合多层 pre/post mix 重计算。`mhc_pre_big_fuse` 融合 reduce/RMSNorm、split mixes、Sinkhorn 和 pre apply mix 的前向路径。
+
 ## 扩展方向
 
 - `src/cann_ops_tilelang/quant/`：公共 scaling-factor layout 和 FP8/FP4 类型系统；
