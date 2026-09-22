@@ -13,7 +13,7 @@
 # with OPERATOR_TEST_MAP. Rules are loaded once in incremental mode.
 #
 # Optional overrides:
-#   DEVICE_ID=1,3 PYTEST_WORKERS=8 bash scripts/ut.sh
+#   DEVICE_ID=1,3 PYTEST_WORKERS=6 bash scripts/ut.sh
 #   bash scripts/ut.sh tests/quant/test_swiglu_forward.py -k case_name
 #
 # Benchmark regression mode (opt-in): TK_RUN_BENCHMARK=1 runs only the
@@ -28,7 +28,7 @@ set -Eeo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 CONDA_ENV="${CONDA_ENV:-tl_tilelang0920ci}"
 DEVICE_ID="${DEVICE_ID:-${ASCEND_RT_VISIBLE_DEVICES:-1,3}}"
-PYTEST_WORKERS="${PYTEST_WORKERS:-8}"
+PYTEST_WORKERS="${PYTEST_WORKERS:-6}"
 PR_FILELIST="${PR_FILELIST:-${ROOT_DIR}/pr_filelist.txt}"
 OPERATOR_TEST_MAP="${OPERATOR_TEST_MAP:-${ROOT_DIR}/.gitcode/config/operator_tests.conf}"
 CPLUS_INCLUDE_PATH="${CPLUS_INCLUDE_PATH:-/usr/include/c++/11:/usr/include/x86_64-linux-gnu/c++/11:/usr/include/c++/11/backward}"
