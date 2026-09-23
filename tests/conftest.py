@@ -65,13 +65,13 @@ _bind_xdist_worker_to_npu()
 
 @pytest.fixture(autouse=True)
 def reset_cann_ops_tilelang_runtime_config():
-    """Prevent cached device configuration from leaking between tests."""
+    """Prevent runtime configuration from leaking between tests."""
 
-    from cann_ops_tilelang.config import clear_runtime_caches
+    from cann_ops_tilelang.config import reset_runtime_config
 
-    clear_runtime_caches()
+    reset_runtime_config()
     yield
-    clear_runtime_caches()
+    reset_runtime_config()
 
 
 @pytest.fixture(scope='session')

@@ -32,6 +32,21 @@ __all__ = [
     'moe_topk_gate',
     'normalize_weight',
     'topk_gate',
+    'cast_back',
+    'per_block_cast',
+    'per_block_cast_lossless',
+    'per_block_cast_with_precomputed_sf',
+    'per_block_cast_with_sf_only',
+    'per_channel_cast',
+    'per_token_cast',
+    'per_token_cast_and_cast_back',
+    'per_token_cast_back',
+    'per_token_cast_with_precomputed_sf',
+    'per_token_cast_with_sf_only',
+    'swiglu_backward',
+    'swiglu_forward',
+    'swiglu_forward_and_per_token_cast',
+    'unpack_from_e2m1fn_x2',
 ]
 
 from .engram import (
@@ -67,3 +82,20 @@ from .mhc import (
     mhc_sinkhorn_forward,
 )
 from .moe import moe_topk_gate, normalize_weight, topk_gate
+from .quant import (
+    cast_back,
+    per_block_cast,
+    per_block_cast_lossless,
+    per_block_cast_with_precomputed_sf,
+    per_block_cast_with_sf_only,
+    per_channel_cast,
+    per_token_cast,
+    per_token_cast_and_cast_back,
+    per_token_cast_back,
+    per_token_cast_with_precomputed_sf,
+    per_token_cast_with_sf_only,
+    swiglu_backward,
+    swiglu_forward,
+    swiglu_forward_and_per_token_cast,
+    unpack_from_e2m1fn_x2,
+)
