@@ -69,11 +69,12 @@ def get_per_block_cast_lossless_kernel_asc(hidden: int, in_config: CastInputConf
     assert not in_config.use_tma_aligned_col_major_sf or in_config.use_packed_ue8m0
     assert not out_config.use_tma_aligned_col_major_sf or out_config.use_packed_ue8m0
     assert hidden % out_config.sf_block[1] == 0
-    # TMA (col-major) output sf is only supported for the block-level (32, 32) layout:
-    # per-data-row sf (1, 128) and the single-sf-per-block (128, 128) case cannot be
-    # packed into UE8M0 within one block (tests filter those combinations on Ascend).
-    assert not out_config.use_tma_aligned_col_major_sf or out_config.sf_block == (32, 32)
-
+    is_tma_packed = out_config.use_tma_aligned_col_major_sf and out_config.use_packed_ue8m0
+    # TMA+packed (col-major UE8M0) packs two out-sf values into one uint16, so each
+    # persistent task must span 2*out_sf_k columns. For out_sf_k==128: per-row uses
+    # block_k=256 (row-local or-shift pack); (128, 128) keeps block_k=128 for the UB
+    # budget and iterates num_k_subs sub-blocks, staging the first sf in a padding
+    # row and or-shifting it with the second.
     out_sf_m, out_sf_k = out_config.sf_block
     if out_sf_m == 1:
         # (1, 128): every data row produces its own out-sf. block_m=64 halves the
@@ -85,14 +86,29 @@ def get_per_block_cast_lossless_kernel_asc(hidden: int, in_config: CastInputConf
     else:
         block_m = out_sf_m
     if out_sf_k == 128:
-        # Output sf covers 128 columns; fix block_k at 128 so the 4-slot column
-        # merge reduces to a single PAT_ALL group (verified) and every block
-        # produces exactly one out-sf column. block_k = 128 also keeps block_m =
-        # 128 (i.e. (128, 128)) inside the shared-memory budget.
-        block_k = 128
+        # Output sf covers 128 columns; block_k stays 128 so the 4-slot merge is a
+        # single PAT_ALL group (verified) and (128, 128) stays in UB budget.
+        if is_tma_packed:
+            if out_sf_m == 1:
+                # per-row: cover 256 columns in one task -> two sf packed in-row.
+                block_k = 256 if hidden % 256 == 0 else 128
+                num_k_subs = 1
+            else:
+                # (128, 128): 2 sub-blocks of 128 columns span 256 columns.
+                block_k = 128
+                num_k_subs = 2 if hidden % 256 == 0 else 1
+        else:
+            block_k = 128
+            num_k_subs = 1
     else:
         block_k = math.gcd(2048, hidden)
-    assert block_k % out_sf_k == 0 and hidden % block_k == 0
+        num_k_subs = 1
+    k_span = block_k * num_k_subs
+    sf_per_pid = k_span // out_sf_k
+    # Packed UE8M0 needs an even number of sf values per persistent task to form a
+    # uint16; a task producing exactly one sf stores (sf | 0).
+    assert not is_tma_packed or sf_per_pid % get_packed_ue8m0_pack_factor() == 0 or sf_per_pid == 1
+    assert block_k % out_sf_k == 0 and hidden % k_span == 0
     if block_k <= 1024 and block_m <= 64:
         num_stages = 3
     else:
@@ -120,7 +136,18 @@ def get_per_block_cast_lossless_kernel_asc(hidden: int, in_config: CastInputConf
         sf_load_ub_shape = (block_m, vec_size * in_pack_factor)
     if out_config.use_tma_aligned_col_major_sf:
         num_batched_tiles = 2
-        out_sf_shape_ub = (max(num_sf_store_cols, 4 * out_pack_factor), num_batched_tiles * out_pack_factor)
+        if is_tma_packed:
+            if out_sf_m == 1:
+                # per-row: flat staging buffer, slot = row*num_batched_tiles + batch;
+                # padded to 256 so a NORM_B16 vsts footprint (slot + 128) stays in bounds.
+                out_sf_shape_ub = (max(block_m * num_batched_tiles, 256),)
+            else:
+                # block: (num_sf_store_cols, num_batched_tiles) padded to >= 128 rows
+                # (NORM_B16 vsts footprint); one extra row stages the first sf of a
+                # (128,128) 2-sub-block pair.
+                out_sf_shape_ub = (max(num_sf_store_cols + (1 if num_k_subs == 2 else 0), 128), num_batched_tiles)
+        else:
+            out_sf_shape_ub = (max(num_sf_store_cols, 4 * out_pack_factor), num_batched_tiles * out_pack_factor)
     else:
         num_batched_tiles = 1
         out_sf_shape_ub = (num_out_sf_rows, max(num_sf_store_cols, 8 * out_pack_factor) * out_pack_factor)
@@ -154,23 +181,37 @@ def get_per_block_cast_lossless_kernel_asc(hidden: int, in_config: CastInputConf
         return S.vpack(S.vshrs(T.reinterpret(values, 'uint32x64'), 23))
 
     @T.macro
-    def copy_sf(x_sf, sf_load_ub, row_start, pid_k):
+    def copy_sf(x_sf, sf_load_ub, row_start, pid_k, sub=0):
         if in_config.use_tma_aligned_col_major_sf:
-            col_start = T.alloc_var(T.int32, init=pid_k * num_sf_load_cols)
+            col_start = T.alloc_var(T.int32, init=pid_k * num_sf_load_cols * num_k_subs + sub * num_sf_load_cols)
             T.copy(
                 x_sf[col_start, row_start * in_pack_factor], sf_load_ub[:num_sf_load_cols, : block_m * in_pack_factor]
             )
         else:
-            col_start = T.alloc_var(T.int32, init=pid_k * num_sf_cols_per_block)
+            col_start = T.alloc_var(
+                T.int32, init=pid_k * num_sf_cols_per_block * num_k_subs + sub * num_sf_cols_per_block
+            )
             T.copy(x_sf[row_start, col_start], sf_load_ub[:block_m, :num_sf_cols_per_block])
 
     @T.macro
-    def col_merge(v):
-        # Merge every 4 consecutive 32-column slots into a single 128-column
-        # out-sf value. block_k is fixed at 128 for out_sf_k == 128, so the merge
-        # is a single PAT_ALL group reduce + broadcast (verified semantics).
+    def col_merge(v, num_groups):
+        # Merge groups of 4 consecutive 32-column slots into a single 128-column
+        # out-sf value. num_groups=1 (block_k=128): single PAT_ALL reduce + broadcast.
+        # num_groups=2 (block_k=256): slots 0-3 -> SF0 (lanes 0-3), slots 4-7 -> SF1
+        # (lanes 4+), so the or-shift pack yields (SF1<<8)|SF0 at lane 0.
         pat_all = S.pset(16, 'PAT_ALL')
-        return S.vdupv(S.vcmax(v, pat_all), pat_all)
+        if num_groups == 1:
+            return S.vdupv(S.vcmax(v, pat_all), pat_all)
+        lanes = lane_indices(T.uint16)
+        zero = S.vdup(0, T.uint16)
+        mask_lt4 = S.vcmps(lanes, T.uint16(4), op='lt')
+        idx_shift = S.vsel(S.vadds(lanes, 4), zero, mask_lt4)
+        v_hi_raw = S.vselr(v, idx_shift)
+        v_hi = S.vsel(v_hi_raw, zero, mask_lt4)
+        v_lo = S.vsel(v, zero, mask_lt4)
+        sf0 = S.vdupv(S.vcmax(v_lo, pat_all), pat_all)
+        sf1 = S.vdupv(S.vcmax(v_hi, pat_all), pat_all)
+        return S.vsel(sf0, sf1, mask_lt4)
 
     @T.macro
     def emit_out_sf(
@@ -185,6 +226,7 @@ def get_per_block_cast_lossless_kernel_asc(hidden: int, in_config: CastInputConf
         mask,
         zero,
         six,
+        sf_sub=0,
     ):
         full_mask = vector_mask(T.uint16, max(num_sf_cols_per_block, 16))
         S.vsts(sf_exp_ub[sf_exp_row, 0], S.vadds(out_exp_row, -5), full_mask, dist='NORM_B16')
@@ -193,6 +235,41 @@ def get_per_block_cast_lossless_kernel_asc(hidden: int, in_config: CastInputConf
         acc_invalid = S.vmax(max_invalid, S.vld(invalid_exp_ub[0], dist='BRC_B16'))
         assert_mask = vector_mask(T.uint16, 16)
         S.vsts(invalid_exp_ub[0], acc_invalid, assert_mask, dist='NORM_B16')
+        one_mask = S.pset(16, 'PAT_VL1')
+        if is_tma_packed:
+            if out_sf_k == 128:
+                if sf_per_pid % out_pack_factor == 0:
+                    if num_k_subs == 2:
+                        # (128, 128): two sub-blocks share one uint16; stage SF0 in a
+                        # padding row, or-shift SF1 on the second sub-block.
+                        exp_lo = S.vand(out_exp_row, S.vdup(T.uint16(0x00FF), T.uint16))
+                        if sf_sub == 0:
+                            S.vsts(out_sf_ub[num_sf_store_cols, store_row], exp_lo, one_mask, dist='ONEPT_B16')
+                        else:
+                            prev = S.vld(out_sf_ub[num_sf_store_cols, store_row], dist='BRC_B16')
+                            packed = S.vor(prev, S.vshls(S.vdupv(out_exp_row, pos='POS_HIGHEST'), 8))
+                            S.vsts(out_sf_ub[0, store_row], packed, one_mask, dist='ONEPT_B16')
+                        return
+                    # per-row 256-col: col_merge leaves SF0 in lanes 0-3 and SF1 in
+                    # lanes 4+, so the highest lane carries the second sf's exponent.
+                    exponent_high = S.vdupv(out_exp_row, pos='POS_HIGHEST')
+                    out_sf_value = S.vor(out_exp_row, S.vshls(exponent_high, 8))
+                    S.vsts(out_sf_ub[store_row * block_m + sf_ub_row], out_sf_value, one_mask, dist='ONEPT_B16')
+                    return
+                # single sf per task: (sf | 0), trailing byte zero-filled.
+                out_sf_value = S.vand(out_exp_row, S.vdup(T.uint16(0x00FF), T.uint16))
+                if out_sf_m == 1:
+                    S.vsts(out_sf_ub[store_row * block_m + sf_ub_row], out_sf_value, one_mask, dist='ONEPT_B16')
+                else:
+                    S.vsts(out_sf_ub[0, store_row], out_sf_value, one_mask, dist='ONEPT_B16')
+                return
+            # out_sf_k == 32: vpack produces adjacent sf pairs (SF1<<8)|SF0 at
+            # lanes 0..num_sf_store_cols-1; store each pair via ONEPT_B16.
+            out_sf_value = T.reinterpret(S.vpack(out_exp_row), 'uint16x128')
+            for s in range(num_sf_store_cols):
+                pair = S.vselr(out_sf_value, S.vdup(s, T.uint16))
+                S.vsts(out_sf_ub[s, store_row], pair, one_mask, dist='ONEPT_B16')
+            return
         out_sf_value = S.alloc_var(out_sf_dtype)
         if out_sf_dtype == T.uint16:
             out_sf_value = T.reinterpret(S.vpack(out_exp_row), 'uint16x128')
@@ -200,17 +277,13 @@ def get_per_block_cast_lossless_kernel_asc(hidden: int, in_config: CastInputConf
             wide_exp, _ = S.vintlv(out_exp_row, zero)
             out_sf_value = T.reinterpret(S.vshls(T.reinterpret(wide_exp, 'uint32x64'), 23), 'float32x64')
         out_store_mask = vector_mask(out_sf_dtype, num_sf_store_cols)
-        if out_config.use_tma_aligned_col_major_sf:
-            store_indices = lane_indices(out_sf_dtype)
-            offsets = S.vadds(S.vmuls(store_indices, num_batched_tiles), store_row)
-            S.vscatter(out_sf_value, out_sf_ub[0, 0], offsets, out_store_mask)
-        elif out_sf_dtype == T.uint16:
+        if out_sf_dtype == T.uint16:
             S.vsts(out_sf_ub[sf_ub_row, 0], out_sf_value, out_store_mask, dist='NORM_B16')
         else:
             S.vsts(out_sf_ub[sf_ub_row, 0], out_sf_value, out_store_mask, dist='NORM_B32')
 
     @T.macro
-    def reduce_sf(sf_load_ub, sf_exp_ub, out_sf_ub, invalid_exp_ub, store_row):
+    def reduce_sf(sf_load_ub, sf_exp_ub, out_sf_ub, invalid_exp_ub, store_row, sf_sub=0):
         with T.SimdVF():
             mask = vector_mask(T.uint16, num_sf_cols_per_block)
             full_mask = vector_mask(T.uint16, max(num_sf_cols_per_block, 16))
@@ -247,8 +320,8 @@ def get_per_block_cast_lossless_kernel_asc(hidden: int, in_config: CastInputConf
                     # max_exp/min_exp cross-row reduction is only needed for the
                     # block-level (out_sf_m != 1) path, so skip it here to save 4
                     # vector ops per 2 rows (compile-time branch).
-                    out_exp0 = col_merge(S.vsub(S.vmax(in_exp0_clean, six), six))
-                    out_exp1 = col_merge(S.vsub(S.vmax(in_exp1_clean, six), six))
+                    out_exp0 = col_merge(S.vsub(S.vmax(in_exp0_clean, six), six), block_k // 128)
+                    out_exp1 = col_merge(S.vsub(S.vmax(in_exp1_clean, six), six), block_k // 128)
                     emit_out_sf(
                         sf_exp_ub,
                         out_sf_ub,
@@ -261,6 +334,7 @@ def get_per_block_cast_lossless_kernel_asc(hidden: int, in_config: CastInputConf
                         mask,
                         zero,
                         six,
+                        sf_sub,
                     )
                     emit_out_sf(
                         sf_exp_ub,
@@ -274,6 +348,7 @@ def get_per_block_cast_lossless_kernel_asc(hidden: int, in_config: CastInputConf
                         mask,
                         zero,
                         six,
+                        sf_sub,
                     )
                 else:
                     max_exp0 = S.vmax(max_exp0, in_exp0_clean, mask)
@@ -286,9 +361,20 @@ def get_per_block_cast_lossless_kernel_asc(hidden: int, in_config: CastInputConf
                 out_exp = S.alloc_var(T.uint16)
                 out_exp = S.vsub(S.vmax(max_exp, six), six)
                 if out_sf_k == 128:
-                    out_exp = col_merge(out_exp)
+                    out_exp = col_merge(out_exp, 1)
                 emit_out_sf(
-                    sf_exp_ub, out_sf_ub, invalid_exp_ub, out_exp, min_exp, block_m, 0, store_row, mask, zero, six
+                    sf_exp_ub,
+                    out_sf_ub,
+                    invalid_exp_ub,
+                    out_exp,
+                    min_exp,
+                    block_m,
+                    0,
+                    store_row,
+                    mask,
+                    zero,
+                    six,
+                    sf_sub,
                 )
 
     @T.macro
@@ -347,11 +433,17 @@ def get_per_block_cast_lossless_kernel_asc(hidden: int, in_config: CastInputConf
     ):
         with T.Kernel(num_cores) as core_id:
             x_ub = T.alloc_shared((block_m, quant_cols), in_config.dtype)
+            # tilelang-new's PlanMTECopy requires sub-byte (4-bit) rows to be
+            # byte-aligned; x's physical storage is packed uint8 (2 fp4 per byte).
+            # Copying through a uint8 byte view keeps the same layout while making
+            # row_bits = n*8 provably a multiple of 8, bypassing that check.
+            x_bytes = T.Tensor((num_tokens, hidden // 2), T.uint8, x.data)
+            x_ub_bytes = T.Tensor((block_m, quant_cols // 2), T.uint8, x_ub.data)
             sf_exp_ub = T.alloc_shared((block_m + num_out_sf_rows, max(num_sf_cols_per_block, 16)), T.uint16)
             out_ub = T.alloc_shared((block_m, quant_cols), out_config.dtype)
             fp4_to_fp8_map_ub = T.alloc_shared((256,), T.uint8)
             sf_load_ub = T.alloc_shared(sf_load_ub_shape, in_config.sf_dtype)
-            out_sf_ub = T.alloc_shared(out_sf_shape_ub, out_config.sf_dtype)
+            out_sf_ub = T.alloc_shared(out_sf_shape_ub, T.uint16 if is_tma_packed else out_config.sf_dtype)
             invalid_exp_ub = T.alloc_shared((16,), T.uint16)
             T.annotate_buffer_versions(
                 {
@@ -365,7 +457,7 @@ def get_per_block_cast_lossless_kernel_asc(hidden: int, in_config: CastInputConf
             )
             init_fp4_to_fp8_map(fp4_to_fp8_map_ub, invalid_exp_ub)
             for pid_m, pid_k in T.Persistent(
-                [num_tokens // (block_m * num_batched_tiles), hidden // block_k],
+                [T.ceildiv(num_tokens, block_m * num_batched_tiles), hidden // k_span],
                 num_cores,
                 core_id,
                 group_size=1,
@@ -374,26 +466,51 @@ def get_per_block_cast_lossless_kernel_asc(hidden: int, in_config: CastInputConf
                 for batch in T.serial(num_batched_tiles):
                     tile_m = T.alloc_var(T.int32, init=pid_m * num_batched_tiles + batch)
                     row_start = T.alloc_var(T.int32, init=tile_m * block_m)
-                    if block_k < 256:
-                        # Zero-fill the padded 256-column tile so the padded FP4 bytes
-                        # decode to code 0 (legal lookup) during quant. S.vsts writes
-                        # 256 bytes (two 128-byte rows) per call.
-                        with T.SimdVF():
-                            zero8 = S.vdup(0, T.uint8)
-                            for pad_row in T.serial(0, block_m, 2):
-                                S.vsts(x_ub[pad_row, 0], zero8, dist='NORM_B8')
-                    T.copy(x[row_start, pid_k * block_k], x_ub[:block_m, :block_k])
-                    copy_sf(x_sf, sf_load_ub, row_start, pid_k)
-                    reduce_sf(sf_load_ub, sf_exp_ub, out_sf_ub, invalid_exp_ub, batch)
-                    quant(sf_exp_ub, x_ub, out_ub, fp4_to_fp8_map_ub)
-                    T.copy(out_ub[:block_m, :block_k], out[row_start, pid_k * block_k])
+                    if row_start < num_tokens:
+                        if block_k < 256:
+                            # Zero-fill the padded 256-column tile so the padded FP4 bytes
+                            # decode to code 0 (legal lookup) during quant. S.vsts writes
+                            # 256 bytes (two 128-byte rows) per call.
+                            with T.SimdVF():
+                                zero8 = S.vdup(0, T.uint8)
+                                for pad_row in T.serial(0, block_m, 2):
+                                    S.vsts(x_ub[pad_row, 0], zero8, dist='NORM_B8')
+                        for sub in range(num_k_subs):
+                            k_col = T.alloc_var(T.int32, init=pid_k * k_span + sub * block_k)
+                            T.copy(x_bytes[row_start, k_col // 2], x_ub_bytes[:block_m, : block_k // 2])
+                            copy_sf(x_sf, sf_load_ub, row_start, pid_k, sub)
+                            reduce_sf(sf_load_ub, sf_exp_ub, out_sf_ub, invalid_exp_ub, batch, sf_sub=sub)
+                            quant(sf_exp_ub, x_ub, out_ub, fp4_to_fp8_map_ub)
+                            T.copy(out_ub[:block_m, :block_k], out[row_start, k_col])
                 first_tile = T.alloc_var(T.int32, init=pid_m * num_batched_tiles)
                 store_base = T.alloc_var(T.int32, init=pid_k * num_sf_store_cols)
                 if out_config.use_tma_aligned_col_major_sf:
-                    T.copy(
-                        out_sf_ub[:num_sf_store_cols, : num_batched_tiles * out_pack_factor],
-                        out_sf[store_base, first_tile * out_pack_factor],
-                    )
+                    if is_tma_packed:
+                        # out_sf is physically uint8 (packed UE8M0); view it as uint16
+                        # so the staging copy is uint16 -> uint16.
+                        output_sf = T.Tensor(
+                            (out_sf_shape[0], out_sf_shape[1] // out_pack_factor), T.uint16, out_sf.data
+                        )
+                        if out_sf_m == 1:
+                            # per-row: flat (N,) staging copied into the k-slot row.
+                            T.copy(
+                                out_sf_ub[0 : block_m * num_batched_tiles],
+                                output_sf[
+                                    pid_k * num_sf_store_cols,
+                                    first_tile * block_m : first_tile * block_m + block_m * num_batched_tiles,
+                                ],
+                            )
+                        else:
+                            # block: phys[k_slot, token_block].
+                            T.copy(
+                                out_sf_ub[:num_sf_store_cols, :num_batched_tiles],
+                                output_sf[pid_k * num_sf_store_cols, first_tile],
+                            )
+                    else:
+                        T.copy(
+                            out_sf_ub[:num_sf_store_cols, : num_batched_tiles * out_pack_factor],
+                            out_sf[store_base, first_tile * out_pack_factor],
+                        )
                 else:
                     # Both buffers expose packed UE8M0 as uint8, so copy and index by
                     # logical output-sf columns. This also handles a one-sf tile without

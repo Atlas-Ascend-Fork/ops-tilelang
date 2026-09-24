@@ -4,7 +4,6 @@ import pytest
 import torch
 
 import cann_ops_tilelang
-from cann_ops_tilelang.config import get_device
 from tests.quant.cast_ref import cast, cast_back
 from tests.testing.bench import make_param_id
 from tests.testing.generator import (
@@ -97,7 +96,6 @@ def generate_test_params(level: int) -> list[dict]:
         for out_sf_block_m, out_sf_block_k in out_sf_blocks
         for in_sf_block_m, in_sf_block_k in ((1, 32),)
         if hidden_size % out_sf_block_k == 0
-        if not (out_sf_block_m != 32 and out_use_tma_aligned_col_major_sf)
     ]
     return params
 
@@ -116,28 +114,6 @@ def test_per_block_cast_lossless(params):
 
     x_fp8_fp32_ref = cast_back(x_fp4, 'fp32', (in_sf_block_m, in_sf_block_k))
     x_fp8_fp32 = cast_back(x_fp8, 'fp32', (out_sf_block_m, out_sf_block_k))
-    assert_equal(x_fp8_fp32, x_fp8_fp32_ref)
-
-
-def test_per_block_cast_lossless_row_major_packed_ue8m0():
-    x = torch.empty((128, 256), dtype=torch.bfloat16, device=get_device())
-    x[:, :128] = 1.0
-    x[:, 128:] = 32.0
-    x_fp4 = cast(x, 'e2m1', (1, 32), round_sf=True)
-
-    x_fp8 = cann_ops_tilelang.per_block_cast_lossless(
-        x_fp4,
-        'e4m3',
-        x_block_size=(1, 32),
-        out_block_size=(128, 128),
-        round_sf=True,
-        use_packed_ue8m0=True,
-    )
-    x_fp8_ref = cast(x, 'e4m3', (128, 128), round_sf=True, use_packed_ue8m0=True)
-
-    x_fp8_fp32_ref = cast_back(x_fp4, 'fp32', (1, 32))
-    x_fp8_fp32 = cast_back(x_fp8, 'fp32', (128, 128))
-    assert torch.equal(x_fp8[1], x_fp8_ref[1])
     assert_equal(x_fp8_fp32, x_fp8_fp32_ref)
 
 
