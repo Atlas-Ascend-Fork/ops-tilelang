@@ -26,12 +26,11 @@
 set -Eeo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
-CONDA_ENV="${CONDA_ENV:-tl_tilelang0920ci}"
+CONDA_ENV="${CONDA_ENV:-tl_tilelang0922ci}"
 DEVICE_ID="${DEVICE_ID:-${ASCEND_RT_VISIBLE_DEVICES:-1,3}}"
 PYTEST_WORKERS="${PYTEST_WORKERS:-6}"
 PR_FILELIST="${PR_FILELIST:-${ROOT_DIR}/pr_filelist.txt}"
 OPERATOR_TEST_MAP="${OPERATOR_TEST_MAP:-${ROOT_DIR}/.gitcode/config/operator_tests.conf}"
-CPLUS_INCLUDE_PATH="${CPLUS_INCLUDE_PATH:-/usr/include/c++/11:/usr/include/x86_64-linux-gnu/c++/11:/usr/include/c++/11/backward}"
 
 if [[ ! "${PYTEST_WORKERS}" =~ ^[1-9][0-9]*$ ]]; then
     echo "PYTEST_WORKERS must be a positive integer, got: ${PYTEST_WORKERS}" >&2
@@ -45,13 +44,12 @@ fi
 
 source /root/miniconda3/etc/profile.d/conda.sh
 conda activate "${CONDA_ENV}"
-source /data/z00520135/weekly0920/cann/set_env.sh
+source /data/z00520135/weekly0922/cann/set_env.sh
 
 cd "${ROOT_DIR}"
 
 export ASCEND_RT_VISIBLE_DEVICES="${DEVICE_ID}"
 export TILELANG_DISABLE_CACHE=1
-export CPLUS_INCLUDE_PATH
 
 echo "Running regular pytest cases on NPU ${ASCEND_RT_VISIBLE_DEVICES} with ${PYTEST_WORKERS} workers"
 
