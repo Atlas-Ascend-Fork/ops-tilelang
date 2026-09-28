@@ -1,0 +1,27 @@
+# Python >= 3.10; runtime, test, and development dependencies.
+# Install with: python -m pip install -r requirements.txt
+# Version constraints below follow pyproject.toml.
+#
+# Ascend prerequisites must be installed for the target environment first:
+# - CANN Toolkit and the Ascend driver (not pip packages).
+# - torch_npu matched to the installed PyTorch and CANN versions.
+# - An Ascend-enabled TileLang build providing tilelang.ascend and its TVM.
+#   The tilelang version constraint alone does not guarantee Ascend support.
+
+# Runtime
+torch>=2.1
+tilelang>=0.1.9
+
+# Tests (NumPy is also required by Tensor.numpy() in test references)
+numpy
+pytest>=8
+pytest-xdist>=3
+# SciPy is optional: random-sampling tests include a standard-library fallback.
+
+# Build and development tools
+build>=1.2
+setuptools>=68
+setuptools-scm>=8
+wheel
+ruff>=0.12
+pre-commit>=4

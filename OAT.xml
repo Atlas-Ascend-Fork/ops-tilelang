@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Copyright (c) 2026 ops-tilelang contributors
+    SPDX-License-Identifier: MIT
+    See LICENSE in the repository root for the full license text.
+-->
+<configuration>
+    <oatconfig>
+        <!-- Use the repository-root LICENSE file. -->
+        <licensefile></licensefile>
+        <policylist>
+            <policy name="projectPolicy" desc="ops-tilelang project policies">
+                <policyitem type="license" name="MIT" path=".*" filefilter="defaultPolicyFilter" desc="Project license declared in LICENSE and pyproject.toml"/>
+                <policyitem type="copyright" name="ops-tilelang contributors" path=".*" rule="may" group="defaultGroup" filefilter="copyrightPolicyFilter" desc="Copyright holder declared in LICENSE"/>
+            </policy>
+        </policylist>
+        <filefilterlist>
+            <filefilter name="defaultFilter" desc="Files excluded from all checks">
+            </filefilter>
+            <filefilter name="defaultPolicyFilter" desc="Exceptions for license header policies">
+                <filteritem type="filename" name="*.yaml" desc="YAML configuration files do not require license headers"/>
+                <filteritem type="filename" name="*.yml" desc="YAML configuration files do not require license headers"/>
+                <filteritem type="filename" name="pyproject.toml" desc="Python package and tool configuration; project license is declared in its metadata"/>
+                <filteritem type="filepath" name="tests/[^/]+/benchmark/.*\.jsonl" desc="Machine-readable benchmark baselines cannot contain comment headers"/>
+                <filteritem type="filepath" name="tests/[^/]+/npu_mem_profiles/.*\.json" desc="Machine-readable NPU memory profiles cannot contain comment headers"/>
+            </filefilter>
+            <filefilter name="copyrightPolicyFilter" desc="Exceptions for copyright header policies">
+                <filteritem type="filepath" name="tests/[^/]+/benchmark/.*\.jsonl" desc="JSONL benchmark records cannot contain comment headers"/>
+                <filteritem type="filepath" name="tests/[^/]+/npu_mem_profiles/.*\.json" desc="JSON memory profiles cannot contain comment headers"/>
+            </filefilter>
+            <filefilter name="licenseFileNamePolicyFilter" desc="Exceptions for LICENSE file policies">
+            </filefilter>
+            <filefilter name="readmeFileNamePolicyFilter" desc="Exceptions for README file policies">
+            </filefilter>
+            <filefilter name="readmeOpenSourcefileNamePolicyFilter" desc="Exceptions for README.OpenSource file policies">
+            </filefilter>
+            <filefilter name="binaryFileTypePolicyFilter" desc="Exceptions for binary file policies">
+            </filefilter>
+        </filefilterlist>
+        <!-- MIT uses the scanner's built-in license recognition. -->
+        <licensematcherlist>
+        </licensematcherlist>
+    </oatconfig>
+</configuration>

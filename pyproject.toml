@@ -37,9 +37,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://gitee.com/ascend/ops-tilelang"
-Repository = "https://gitee.com/ascend/ops-tilelang"
-Issues = "https://gitee.com/ascend/ops-tilelang/issues"
+Homepage = "https://gitcode.com/cann/ops-tilelang"
+Repository = "https://gitcode.com/cann/ops-tilelang"
+Issues = "https://gitcode.com/cann/ops-tilelang/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
