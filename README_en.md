@@ -41,6 +41,10 @@ ops-tilelang/
 - PyTorch NPU compatible with the installed CANN version
 - TileLang with Ascend target support
 
+### Version Compatibility
+
+CANN **9.3.0 or later** is required. Use a **CANN community weekly build**, available from the [CANN download page](https://www.hiascend.com/cann/download?versionId=799&ids=d806%2Ch0501%2Ch0601%2Ch0703&currentTab=1).
+
 The repository declares only the general-purpose `torch` and `tilelang` Python dependencies. `torch_npu`, the CANN Toolkit, and the driver have strict compatibility requirements and must be installed by the deployment environment rather than pinned as PyPI dependencies.
 
 ## Installation

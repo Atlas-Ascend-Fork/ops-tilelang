@@ -41,6 +41,10 @@ ops-tilelang/
 - 与 CANN 版本匹配的 PyTorch NPU
 - 支持 Ascend target 的 TileLang
 
+### 版本配套关系
+
+CANN 版本要求 **>= 9.3.0**，请使用 **CANN 社区 weekly 版本**，通过 [CANN 下载页面](https://www.hiascend.com/cann/download?versionId=799&ids=d806%2Ch0501%2Ch0601%2Ch0703&currentTab=1) 获取。
+
 仓库只声明通用的 `torch` 和 `tilelang` Python 依赖。`torch_npu`、CANN Toolkit 与驱动具有严格的版本配套关系，应由部署环境安装，不在 PyPI 依赖中强行固定。
 
 ## 安装
