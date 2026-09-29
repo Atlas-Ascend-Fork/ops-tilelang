@@ -2,12 +2,7 @@
 
 __all__ = [
     'convert_kv_index',
-    'get_dflash_mainx_slot_mapping',
     'get_fused_dflash_get_input',
-    'get_kv_ca_index_decode',
-    'get_kv_ca_index_prefill',
-    'get_kv_swa_index_decode',
-    'get_load_kv_index_kernel',
     'kv_index_cat',
     'load_index_kv_cache',
     'load_kv_cache',
@@ -32,14 +27,7 @@ from .cache import (
     store_kv_cache_llama,
 )
 from .flash_mla_utils import convert_kv_index
-from .get_kv_index import (
-    get_dflash_mainx_slot_mapping,
-    get_fused_dflash_get_input,
-    get_kv_ca_index_decode,
-    get_kv_ca_index_prefill,
-    get_kv_swa_index_decode,
-    get_load_kv_index_kernel,
-)
+from .get_kv_index import get_fused_dflash_get_input
 from .kv_index_cat import kv_index_cat
 from .prepare_cp_mirror import prepare_for_mirror_cp_tilelang
 from .prepare_llama_decode_metadata import prepare_llama_decode_metadata
