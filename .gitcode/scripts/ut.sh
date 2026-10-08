@@ -27,7 +27,7 @@ set -Eeo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 CONDA_ENV="${CONDA_ENV:-tl_tilelang0922ci}"
-DEVICE_ID="${DEVICE_ID:-${ASCEND_RT_VISIBLE_DEVICES:-1,3}}"
+DEVICE_ID="${DEVICE_ID:-${ASCEND_RT_VISIBLE_DEVICES:-2,3}}"
 PYTEST_WORKERS="${PYTEST_WORKERS:-6}"
 PR_FILELIST="${PR_FILELIST:-${ROOT_DIR}/pr_filelist.txt}"
 OPERATOR_TEST_MAP="${OPERATOR_TEST_MAP:-${ROOT_DIR}/.gitcode/config/operator_tests.conf}"
