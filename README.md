@@ -55,13 +55,8 @@ CANN 版本要求 **>= 9.3.0**，请使用 **CANN 社区 weekly 版本**，通�
 pip install -e ".[dev]"
 ```
 
-### 安装发布版本
-
-```bash
-pip install ops-tilelang
-```
-
-发行包名保持为 `ops-tilelang`，Python 导入命名空间为 `cann_ops_tilelang`。
+目前请使用源码开发安装或下方的本地 Wheel 安装。发行包名为
+`ops-tilelang`，Python 导入命名空间为 `cann_ops_tilelang`。
 
 ### 构建并安装 Wheel 包
 

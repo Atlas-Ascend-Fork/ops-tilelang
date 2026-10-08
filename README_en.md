@@ -55,12 +55,7 @@ The repository declares only the general-purpose `torch` and `tilelang` Python d
 pip install -e ".[dev]"
 ```
 
-### Install a Released Version
-
-```bash
-pip install ops-tilelang
-```
-
+For now, install from source as shown above or from a locally built wheel below.
 The distribution package is named `ops-tilelang`, while the Python import namespace is `cann_ops_tilelang`.
 
 ### Build and Install a Wheel
