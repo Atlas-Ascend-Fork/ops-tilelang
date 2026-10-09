@@ -5,6 +5,7 @@ This module intentionally performs no device initialization at import time.
 
 from __future__ import annotations
 
+import math
 import os
 from functools import cache, lru_cache
 
@@ -143,8 +144,8 @@ def set_amax_clamp_for_quant(fmt: str, clamp_min_value: float) -> None:
 
     _validate_quant_format(fmt)
     value = float(clamp_min_value)
-    if value <= 0:
-        raise ValueError(f'clamp_min_value must be positive, got {clamp_min_value}.')
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f'clamp_min_value must be finite and positive, got {clamp_min_value}.')
     _quant_clamp_min_values[fmt] = value
 
 
