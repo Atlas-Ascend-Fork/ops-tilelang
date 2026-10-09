@@ -1,6 +1,6 @@
 # 测试与性能回归框架
 
-测试框架沿用 `TileKernels-Nightly` 的完整链路，并收敛为 Ascend/NPU 语义。根 `conftest.py` 负责在 TileLang 导入前绑定 xdist worker，随后装载以下独立 pytest 插件：
+测试框架沿用 `TileKernels-Nightly` 的完整链路，并收敛为 Ascend/NPU 语义。测试目录根部的 `tests/conftest.py` 负责在 TileLang 导入前绑定 xdist worker，随后装载以下独立 pytest 插件：
 
 - `pytest_random_plugin.py`：`--seed` 与 node ID 组合，得到逐用例稳定随机种子；
 - `pytest_npu_mem_plugin.py`：记录峰值 NPU 显存，自动标记 `large_npu_mem`；

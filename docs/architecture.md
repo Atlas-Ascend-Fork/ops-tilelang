@@ -54,7 +54,7 @@ Kernel generator 使用 `@tilelang.jit`，参数分成两类：
 
 测试辅助工具和 PyTorch reference 全部位于 `tests/`，不属于运行时包，也不会进入 wheel。
 
-测试框架由根 `conftest.py` 统一装载插件，每个算子测试分为：
+测试框架由测试目录根部的 `tests/conftest.py` 统一装载插件，每个算子测试分为：
 
 1. CPU 可执行的导入和参数校验；
 2. NPU 正确性测试；
