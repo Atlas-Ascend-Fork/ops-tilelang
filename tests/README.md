@@ -26,7 +26,7 @@ benchmark 默认跳过，必须显式传入 `--run-benchmark`。Ascend 使用 `m
 # 全部 benchmark
 pytest -m benchmark --run-benchmark
 
-# 用参数表达式筛选；支持 and/or/not、括号和正则
+# 用参数表达式筛选；支持 and/or/not 和正则
 pytest -m benchmark --run-benchmark -K 'hidden=4096 or hidden=7168'
 
 # 指定输出、阈值和最小绝对变化
@@ -42,6 +42,11 @@ pytest tests/engram/test_engram_fused_weight.py \
 # Engram gate 前向/反向及梯度归并
 pytest tests/engram -m benchmark --run-benchmark --refresh-baseline
 ```
+
+`-K` 的布尔运算优先级为 `not`、`and`、`or`（相邻正则也按 `and` 处理）。
+解析器不支持用括号对布尔表达式分组；括号属于单个正则模式的语法。
+例如，用 `-K 'hidden=(4096|7168) and not round=True'` 筛选两种 hidden 值并排除 round=True，
+不要写成 `-K '(hidden=4096 or hidden=7168) and not round=True'`。
 
 `--benchmark-verbose` 展示扩展列，`--legacy-table` 展示算子级几何平均汇总。
 
