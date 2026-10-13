@@ -2,9 +2,9 @@
 
 `ops-tilelang` is a high-performance operator repository for the Ascend platform, built with the TileLang DSL. The project aims to provide the CANN community with operator implementations that have a clear structure, are easy to validate, support continuous performance tuning, and integrate cleanly with upper-layer frameworks.
 
-> **Hardware support**: This repository supports only Ascend A5 and later architectures. Compilation and correct execution on earlier Ascend architectures are not guaranteed.
+> **Hardware support**: This repository supports only Ascend 950 and later architectures. Compilation and correct execution on earlier Ascend architectures are not guaranteed.
 
-The repository provides a complete operator development and validation framework, including operator implementation and exports, runtime configuration, tiered test parameter generation, deterministic random seeds, correctness validation, NPU memory profiling, A5 performance regression testing, xdist-based multi-device binding, staged test scheduling, wheel packaging, and CI execution.
+The repository provides a complete operator development and validation framework, including operator implementation and exports, runtime configuration, tiered test parameter generation, deterministic random seeds, correctness validation, NPU memory profiling, Ascend 950 performance regression testing, xdist-based multi-device binding, staged test scheduling, wheel packaging, and CI execution.
 
 ## Design Principles
 
@@ -36,7 +36,7 @@ ops-tilelang/
 ## Requirements
 
 - Python 3.10+
-- An NPU based on the Ascend A5 or a later architecture
+- An NPU based on the Ascend 950 or a later architecture
 - A working CANN and Ascend driver environment
 - PyTorch NPU compatible with the installed CANN version
 - TileLang with Ascend target support
@@ -98,7 +98,7 @@ pytest tests/engram/test_engram_fused_weight.py -m 'npu and not benchmark'
 # Run the engram_fused_weight performance regression tests
 pytest tests/engram/test_engram_fused_weight.py -m benchmark --run-benchmark
 
-# Refresh the A5 performance baseline and peak NPU memory profile for engram_fused_weight
+# Refresh the Ascend 950 performance baseline and peak NPU memory profile for engram_fused_weight
 pytest tests/engram/test_engram_fused_weight.py -m benchmark --run-benchmark --refresh-baseline
 pytest tests/engram/test_engram_fused_weight.py -m 'not benchmark' --refresh-mem
 
@@ -121,7 +121,7 @@ OPS_TILELANG_CI_TASK=wheel ./scripts/run_ci.sh
 OPS_TILELANG_CI_TASK=npu ./scripts/run_ci.sh
 OPS_TILELANG_CI_TASK=benchmark ./scripts/run_ci.sh tests/engram/test_engram_fused_weight.py
 
-# Run all stages on an Ascend A5 or later CI runner
+# Run all stages on an Ascend 950 or later CI runner
 OPS_TILELANG_CI_TASK=all ./scripts/run_ci.sh
 ```
 

@@ -250,7 +250,7 @@ pytest --refresh-mem --refresh-mem-missing-only
 
 检查生成的 `tests/foo/npu_mem_profiles/test_foo_bar.json`，确认用例数量、node ID 和峰值显存合理。默认 15000 MB 以上的用例进入第二阶段，可用 `--npu-mem-threshold` 临时调整阈值。
 
-## 10. 生成并验证 A5 性能基线
+## 10. 生成并验证 Ascend 950 性能基线
 
 第一次生成基线：
 
@@ -302,7 +302,7 @@ python -m build --no-isolation
 - [ ] Ruff check 与 format 通过；
 - [ ] 单进程和两阶段 xdist 测试通过；
 - [ ] NPU 显存画像已生成并提交；
-- [ ] A5 benchmark 基线已生成，二次回归无缺失；
+- [ ] Ascend 950 benchmark 基线已生成，二次回归无缺失；
 - [ ] sdist 和 wheel 构建成功；
 - [ ] README 或算子文档写明支持范围和已知限制。
 

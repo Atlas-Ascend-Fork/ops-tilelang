@@ -2,9 +2,9 @@
 
 `ops-tilelang` 是面向 Ascend 平台、基于 TileLang DSL 开发的高性能算子仓库。项目目标是为 CANN 社区提供结构清晰、容易验证、可持续调优和便于上层集成的算子实现。
 
-> **硬件支持范围**：本代码仓仅支持 Ascend A5 及以上架构，不保证在更早的 Ascend 架构上可编译或正确运行。
+> **硬件支持范围**：本代码仓仅支持 Ascend 950 及以上架构，不保证在更早的 Ascend 架构上可编译或正确运行。
 
-当前仓库提供完整的算子开发与验证框架，覆盖算子实现与导出、运行配置、分级测试参数生成、确定性随机种子、正确性验证、NPU 显存画像、A5 性能回归、xdist 多卡绑定、分阶段测试调度、Wheel 构建以及 CI 执行等能力。
+当前仓库提供完整的算子开发与验证框架，覆盖算子实现与导出、运行配置、分级测试参数生成、确定性随机种子、正确性验证、NPU 显存画像、Ascend 950 性能回归、xdist 多卡绑定、分阶段测试调度、Wheel 构建以及 CI 执行等能力。
 
 ## 设计原则
 
@@ -36,7 +36,7 @@ ops-tilelang/
 ## 环境要求
 
 - Python 3.10+
-- Ascend A5 及以上架构的 NPU
+- Ascend 950 及以上架构的 NPU
 - 可用的 CANN 与 Ascend 驱动环境
 - 与 CANN 版本匹配的 PyTorch NPU
 - 支持 Ascend target 的 TileLang
@@ -98,7 +98,7 @@ pytest tests/engram/test_engram_fused_weight.py -m 'npu and not benchmark'
 # 运行 engram_fused_weight 性能回归
 pytest tests/engram/test_engram_fused_weight.py -m benchmark --run-benchmark
 
-# 刷新 engram_fused_weight 的 A5 性能基线和 NPU 峰值显存画像
+# 刷新 engram_fused_weight 的 Ascend 950 性能基线和 NPU 峰值显存画像
 pytest tests/engram/test_engram_fused_weight.py -m benchmark --run-benchmark --refresh-baseline
 pytest tests/engram/test_engram_fused_weight.py -m 'not benchmark' --refresh-mem
 
@@ -121,7 +121,7 @@ OPS_TILELANG_CI_TASK=wheel ./scripts/run_ci.sh
 OPS_TILELANG_CI_TASK=npu ./scripts/run_ci.sh
 OPS_TILELANG_CI_TASK=benchmark ./scripts/run_ci.sh tests/engram/test_engram_fused_weight.py
 
-# 在 Ascend A5 及以上 CI runner 上执行全部阶段
+# 在 Ascend 950 及以上 CI runner 上执行全部阶段
 OPS_TILELANG_CI_TASK=all ./scripts/run_ci.sh
 ```
 
