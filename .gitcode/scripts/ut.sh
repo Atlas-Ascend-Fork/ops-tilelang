@@ -8,9 +8,12 @@
 #
 # Incremental mode (default when pr_filelist.txt exists): run changed
 # pytest files directly and map changed operator sources to their pytest files;
+# changes to configured shared files instead run the complete L0 test scope;
 # exit 0 if no changed file qualifies. Override with PR_FILELIST env var.
-# Mapping rules live in .gitcode/config/operator_tests.conf; override its path
-# with OPERATOR_TEST_MAP. Rules are loaded once in incremental mode.
+# Operator mapping rules live in .gitcode/config/operator_tests.conf; override
+# with OPERATOR_TEST_MAP. Full-test trigger rules live in
+# .gitcode/config/full_test_triggers.conf; override with
+# FULL_TEST_TRIGGER_CONFIG. Rules are loaded once in incremental mode.
 #
 # Optional overrides:
 #   DEVICE_ID=1,3 PYTEST_WORKERS=6 bash scripts/ut.sh
@@ -31,6 +34,7 @@ DEVICE_ID="${DEVICE_ID:-${ASCEND_RT_VISIBLE_DEVICES:-2,3}}"
 PYTEST_WORKERS="${PYTEST_WORKERS:-6}"
 PR_FILELIST="${PR_FILELIST:-${ROOT_DIR}/pr_filelist.txt}"
 OPERATOR_TEST_MAP="${OPERATOR_TEST_MAP:-${ROOT_DIR}/.gitcode/config/operator_tests.conf}"
+FULL_TEST_TRIGGER_CONFIG="${FULL_TEST_TRIGGER_CONFIG:-${ROOT_DIR}/.gitcode/config/full_test_triggers.conf}"
 
 if [[ ! "${PYTEST_WORKERS}" =~ ^[1-9][0-9]*$ ]]; then
     echo "PYTEST_WORKERS must be a positive integer, got: ${PYTEST_WORKERS}" >&2
@@ -74,6 +78,52 @@ elif [[ -f "${PR_FILELIST}" ]]; then
             fi
         done
         pytest_targets+=("${test_path}")
+    }
+
+    load_full_test_triggers() {
+        local config_file="$1"
+        local line line_number=0
+        local -a fields=()
+        full_test_source_patterns=()
+
+        if [[ ! -f "${config_file}" || ! -r "${config_file}" ]]; then
+            echo "Full-test trigger config is missing or unreadable: ${config_file}" >&2
+            return 2
+        fi
+
+        while IFS= read -r line || [[ -n "${line}" ]]; do
+            ((line_number += 1))
+            line="${line%$'\r'}"
+            read -r -a fields <<< "${line}"
+            if (( ${#fields[@]} == 0 )) || [[ "${fields[0]}" == \#* ]]; then
+                continue
+            fi
+            if (( ${#fields[@]} != 1 )); then
+                echo "${config_file}:${line_number}: expected exactly one source pattern" >&2
+                return 2
+            fi
+            full_test_source_patterns+=("${fields[0]}")
+        done < "${config_file}"
+
+        if (( ${#full_test_source_patterns[@]} == 0 )); then
+            echo "Full-test trigger config contains no patterns: ${config_file}" >&2
+            return 2
+        fi
+    }
+
+    match_full_test_trigger() {
+        local file_path="$1"
+        local index
+
+        for ((index = 0; index < ${#full_test_source_patterns[@]}; index++)); do
+            # Leave the right-hand side unquoted to apply the configured Bash glob.
+            if [[ "${file_path}" == ${full_test_source_patterns[index]} ]]; then
+                full_test_changed_file="${file_path}"
+                full_test_matched_pattern="${full_test_source_patterns[index]}"
+                return 0
+            fi
+        done
+        return 1
     }
 
     load_operator_test_map() {
@@ -129,34 +179,58 @@ elif [[ -f "${PR_FILELIST}" ]]; then
         return 0
     }
 
+    load_full_test_triggers "${FULL_TEST_TRIGGER_CONFIG}"
     load_operator_test_map "${OPERATOR_TEST_MAP}"
 
     mapfile -t changed_lines < "${PR_FILELIST}"
+    full_test_triggered=0
     for file_path in "${changed_lines[@]}"
     do
-        # Keep the committed name-only file-list parsing behavior.
         file_path="$(echo "${file_path}" | xargs)"
         if [[ -z "${file_path}" ]]; then
             continue
         fi
+        if match_full_test_trigger "${file_path}"; then
+            full_test_triggered=1
+            break
+        fi
+    done
 
-        # Keep the existing behavior for directly changed pytest files.
-        if [[ "${file_path}" == tests/* ]]; then
-            base_name="$(basename -- "${file_path}")"
-            if [[ "${base_name}" == test_*.py || "${base_name}" == *_test.py ]]; then
-                add_pytest_target "${file_path}"
+    if (( full_test_triggered )); then
+        pytest_targets=(tests)
+        export OPS_TILELANG_TEST_LEVEL=0
+        echo "Full L0 UT triggered by shared-file change:"
+        echo "  changed file: ${full_test_changed_file}"
+        echo "  matched rule: ${full_test_matched_pattern}"
+        echo "  pytest target: tests"
+        echo "  OPS_TILELANG_TEST_LEVEL=${OPS_TILELANG_TEST_LEVEL}"
+    else
+        for file_path in "${changed_lines[@]}"
+        do
+            # Keep the committed name-only file-list parsing behavior.
+            file_path="$(echo "${file_path}" | xargs)"
+            if [[ -z "${file_path}" ]]; then
                 continue
             fi
-        fi
 
-        map_operator_tests "${file_path}"
-    done
-    if (( ${#pytest_targets[@]} == 0 )); then
-        echo "No changed pytest file or mapped operator test found, skip UT."
-        exit 0
+            # Keep the existing behavior for directly changed pytest files.
+            if [[ "${file_path}" == tests/* ]]; then
+                base_name="$(basename -- "${file_path}")"
+                if [[ "${base_name}" == test_*.py || "${base_name}" == *_test.py ]]; then
+                    add_pytest_target "${file_path}"
+                    continue
+                fi
+            fi
+
+            map_operator_tests "${file_path}"
+        done
+        if (( ${#pytest_targets[@]} == 0 )); then
+            echo "No changed pytest file, mapped operator test, or full-test trigger found; skip UT."
+            exit 0
+        fi
+        echo "Incremental UT on ${#pytest_targets[@]} changed or mapped pytest file(s):"
+        printf '  %s\n' "${pytest_targets[@]}"
     fi
-    echo "Incremental UT on ${#pytest_targets[@]} changed or mapped pytest file(s):"
-    printf '  %s\n' "${pytest_targets[@]}"
 else
     pytest_targets=(tests)
 fi
