@@ -451,7 +451,7 @@ def pytest_terminal_summary(terminalreporter, config):
                 status = '++'
             else:
                 status = '='
-            cur_bw = rec['bandwidth_gbs']
+            cur_bw = rec.get('bandwidth_gbs')
             line = f'{display_key:<{kw}} {current_us:>8.1f} us {_fmt_bw(cur_bw):>11} {ratio:>7.2f}x {status:>4}'
             for ek in extras_keys:
                 w = ek_widths[ek]
