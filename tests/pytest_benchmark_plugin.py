@@ -354,7 +354,7 @@ def pytest_sessionfinish(session, exitstatus):
     # Stash for pytest_terminal_summary
     config.stash[_BENCHMARK_DETECTION_KEY] = result
 
-    update_summary = _update_baselines(config, results)
+    update_summary = _update_baselines(config, results) if exitstatus == 0 else None
     if update_summary is not None:
         config.stash[_BENCHMARK_UPDATE_SUMMARY_KEY] = update_summary
 

@@ -43,6 +43,8 @@ pytest tests/engram/test_engram_fused_weight.py \
 pytest tests/engram -m benchmark --run-benchmark --refresh-baseline
 ```
 
+`--refresh-baseline` 在 `pytest_sessionfinish` 收到 `exitstatus=0` 时更新基线；收到测试失败、fixture 错误或中断状态时不更新，原始结果输出仍可保留。后续终端报告或其他插件的错误不属于此守卫范围。
+
 `-K` 的布尔运算优先级为 `not`、`and`、`or`（相邻正则也按 `and` 处理）。
 解析器不支持用括号对布尔表达式分组；括号属于单个正则模式的语法。
 例如，用 `-K 'hidden=(4096|7168) and not round=True'` 筛选两种 hidden 值并排除 round=True，
