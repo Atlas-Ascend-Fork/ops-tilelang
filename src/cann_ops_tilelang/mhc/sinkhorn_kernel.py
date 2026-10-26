@@ -6,7 +6,7 @@ _TOKEN_TILE = 64
 _PASS_CONFIGS = {'tl.enable_fast_math': True}
 
 
-@tilelang.jit(target='pto', pass_configs=_PASS_CONFIGS)
+@tilelang.jit(pass_configs=_PASS_CONFIGS)
 def mhc_sinkhorn_forward_kernel(
     x,
     out,
