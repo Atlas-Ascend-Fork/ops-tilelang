@@ -9,6 +9,14 @@
 - `pytest_xdist_failfast_plugin.py`：并行 `-x` 时停止全部 worker；
 - `pytest_tilelang_warning_plugin.py`：在终端汇总 TileLang 编译警告。
 
+## CI 增量测试
+
+CI 根据 `pr_filelist.txt` 中的变更，通过 `.gitcode/scripts/select_tests.py` 静态分析源码和测试的导入关系，自动选择直接或间接受影响的测试。新增算子及测试无需登记映射；测试应通过常规 Python 导入引用被测实现和参考实现。
+
+共享配置、包入口、删除文件或无法确定依赖关系的代码变更保守执行全仓 L0。全局触发策略保留在 `.gitcode/config/full_test_triggers.conf`，其中不维护算子与测试的对应关系。选择器的 CPU 回归测试可用 `python -m unittest discover -s .gitcode/scripts/tests` 运行。
+
+`.gitcode/` 下的 CI 文件默认不触发算子测试，便于管理员在机器故障等场景调整执行逻辑。仅修改 CI 文件或文档时跳过算子用例；同时修改源码或测试时，仍正常选择受影响的测试。显式配置的全量触发规则优先，管理员可按需添加 CI 路径规则；选择器的 CPU 回归测试仍会执行。
+
 ## 测试分级
 
 `OPS_TILELANG_TEST_LEVEL` 取值为 `0`、`1`、`2`，分别表示核心、默认和完整参数集合。参数生成器位于 `tests/testing/generator.py`。
