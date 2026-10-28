@@ -36,9 +36,9 @@
 | --- | --- | --- | --- |
 | 项目元数据 | `pyproject.toml` | `https://gitcode.com/cann/ops-tilelang`、`https://gitcode.com/cann/ops-tilelang/issues` | 声明项目主页、代码仓库和问题反馈入口 |
 | 开发依赖 | `.pre-commit-config.yaml` | `https://gitcode.com/gh_mirrors/ru/ruff-pre-commit` | 获取 Ruff 的 pre-commit hooks |
-| CI 工作流 | `.gitcode/workflows/ops-tlielang_actions.yml`、`.gitcode/workflows/codecheck_action.yml` | `gitcode.com`，仓库路径 `cann/.gitcode` | 引用社区 CI actions 和可复用工作流 |
-| CI 存储 | `.gitcode/workflows/ops-tlielang_actions.yml`、`.gitcode/workflows/codecheck_action.yml` | `https://obs.cn-north-4.myhuaweicloud.com` | 上传和下载 CI 文件及检查结果 |
-| CI 镜像 | `.gitcode/workflows/ops-tlielang_actions.yml`、`.gitcode/workflows/codecheck_action.yml` | `swr.cn-north-4.myhuaweicloud.com` | 获取 CI 容器镜像 |
+| CI 工作流 | `.gitcode/workflows/ops-tilelang_actions.yml`、`.gitcode/workflows/codecheck_action.yml` | `gitcode.com`，仓库路径 `cann/.gitcode` | 引用社区 CI actions 和可复用工作流 |
+| CI 存储 | `.gitcode/workflows/ops-tilelang_actions.yml`、`.gitcode/workflows/codecheck_action.yml` | `https://obs.cn-north-4.myhuaweicloud.com` | 上传和下载 CI 文件及检查结果 |
+| CI 镜像 | `.gitcode/workflows/ops-tilelang_actions.yml`、`.gitcode/workflows/codecheck_action.yml` | `swr.cn-north-4.myhuaweicloud.com` | 获取 CI 容器镜像 |
 | 安全参考 | `SECURITY.md` | `https://gitee.com/ascend/pytorch` | 查阅 PyTorch NPU 安全说明 |
 | 漏洞管理 | `SECURITY.md` | `https://gitcode.com/cann/community/blob/master/security/security.md` | 查阅 CANN 社区漏洞报告与处理流程 |
 
