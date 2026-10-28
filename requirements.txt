@@ -9,7 +9,7 @@
 #   The tilelang version constraint alone does not guarantee Ascend support.
 
 # Runtime
-torch>=2.1
+torch>=2.10
 tilelang>=0.1.9
 
 # Tests (NumPy is also required by Tensor.numpy() in test references)

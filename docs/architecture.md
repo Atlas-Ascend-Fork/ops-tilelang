@@ -77,7 +77,7 @@ cann_ops_tilelang.engram_fused_weight
   -> validate BF16/NPU/2-D/contiguous inputs
   -> choose block size and persistent scheduling from total elements
   -> get_engram_fused_weight_kernel(hidden_size, hc_mult)
-  -> allocate/reuse an FP32 output
+  -> allocate an FP32 output
   -> launch flattened tensors
   -> compare with the FP32 PyTorch reference
 ```
@@ -119,6 +119,48 @@ mhc_post_backward(...)
 ```
 
 `mhc_head_compute_mix_forward` 和 `mhc_head_compute_mix_backward` 处理 head mixing 系数，`mhc_multilayer_recompute` 融合多层 pre/post mix 重计算。`mhc_pre_big_fuse` 融合 reduce/RMSNorm、split mixes、Sinkhorn 和 pre apply mix 的前向路径。
+
+## Engram fused weight 的 torch.compile 接入
+
+`engram_fused_weight` 支持固定形状推理的 `npugraph_ex` 编译路径：
+
+```python
+import torch
+import torch_npu
+
+from cann_ops_tilelang import engram_fused_weight
+
+
+def model(weight_hidden, weight_embed):
+    return engram_fused_weight(-weight_hidden, weight_embed) + 1
+
+
+compiled_model = torch.compile(
+    model, backend='npugraph_ex', fullgraph=True, dynamic=False,
+)
+with torch.inference_mode():
+    a = torch.randn(4, 4096, device='npu', dtype=torch.bfloat16)
+    b = torch.randn_like(a)
+    result = compiled_model(a, b)
+```
+
+编译时，公共接口调用 `cann_ops_tilelang::engram_fused_weight` 自定义算子；其 fake 实现只校验
+shape、dtype、device 和布局，并推导同形状的 FP32 输出。实际执行仍使用原有 TileLang 内核。
+公共接口只接收两个输入张量，直接返回 FP32 结果，不修改输入。普通 eager 调用保持原有路径。
+
+本仓库要求 PyTorch >= 2.10；此接入使用 `torch.library.custom_op`，并需要提供
+`npugraph_ex` 的配套 `torch_npu`。实机验证环境为 PyTorch / torch_npu 2.10。
+输入仍须为连续的二维 BF16 NPU 张量，非空元素数须能被 256 整除；空输入也受支持。
+这里按形状编译，形状变化可能触发重新编译，未注册 autograd 公式。
+首次执行包含 TileLang JIT 和图准备开销。
+
+以下测试包含原有 eager 用例和一个固定形状的 compile 基本功能用例，验证
+`npugraph_ex` 编译执行的结果与 FP32 参考结果一致：
+
+```bash
+OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 OPS_TILELANG_TEST_LEVEL=0 \
+    python -m pytest tests/engram/test_engram_fused_weight.py -m 'not benchmark' -v
+```
 
 ## 扩展方向
 

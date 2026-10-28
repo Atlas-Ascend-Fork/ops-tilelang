@@ -35,6 +35,31 @@ def test_engram_fused_weight(params):
     assert_equal(out, ref)
 
 
+@torch.inference_mode()
+def test_engram_fused_weight_compile():
+    wh_data, we_data = generate_test_data({'hc': 4, 'hidden': 4096})
+    compiled = torch.compile(
+        cann_ops_tilelang.engram_fused_weight,
+        backend='npugraph_ex',
+        fullgraph=True,
+        dynamic=False,
+    )
+    for step in range(3):
+        if step == 1:
+            # Update values while keeping the input storage unchanged.
+            wh_data.add_(1)
+            we_data.neg_()
+        elif step == 2:
+            # Replace both inputs with new tensors of the same shape.
+            wh_data, we_data = generate_test_data({'hc': 4, 'hidden': 4096})
+
+        ref = wh_data.float() * we_data.float()
+        out = compiled(wh_data, we_data)
+        assert_equal(out, ref)
+        # Graph execution may reuse output storage on the next call.
+        del out
+
+
 @pytest.mark.benchmark
 @pytest.mark.parametrize('params', generate_test_params(0), ids=make_param_id)
 def test_engram_fused_weight_benchmark(benchmark_timer, benchmark_record, params):
