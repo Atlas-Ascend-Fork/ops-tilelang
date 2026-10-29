@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from numbers import Real
 
 import torch
@@ -17,6 +18,8 @@ _NUM_GRAD_V_CORES = 12
 def _check_real(name: str, value: float, *, positive: bool) -> None:
     if not isinstance(value, Real):
         raise TypeError(f'{name} must be a real number.')
+    if not math.isfinite(value):
+        raise ValueError(f'{name} must be finite.')
     if positive and value <= 0:
         raise ValueError(f'{name} must be greater than zero.')
     if not positive and value < 0:
