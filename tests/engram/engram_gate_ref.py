@@ -55,3 +55,24 @@ def engram_gate_ref(
     if save_for_backward:
         return output, raw_dot, gate_score, rstd_x, rstd_k
     return output
+
+
+def compile_gate_for_test(operator):
+    return torch.compile(operator, backend='npugraph_ex', fullgraph=True, dynamic=False)
+
+
+def update_gate_inputs(step, x_data, kv_data, wh_data, we_data, weight_fused):
+    if step == 1:
+        # Change values without replacing the input storage.
+        x_data.add_(0.125)
+        kv_data.neg_()
+        wh_data.neg_()
+        weight_fused.copy_(wh_data.float() * we_data.float())
+    elif step == 2:
+        # Replace all input tensors while preserving their metadata.
+        x_data = torch.randn_like(x_data)
+        kv_data = torch.randn_like(kv_data)
+        wh_data = torch.randn_like(wh_data)
+        we_data = torch.randn_like(we_data)
+        weight_fused = wh_data.float() * we_data.float()
+    return x_data, kv_data, wh_data, we_data, weight_fused
