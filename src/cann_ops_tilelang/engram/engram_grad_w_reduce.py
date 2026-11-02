@@ -28,20 +28,13 @@ def _check_tensor(
         raise ValueError(f'{name} must be contiguous.')
 
 
-def engram_grad_w_reduce(
+def _validate_inputs(
     grad_w_partial: torch.Tensor,
     weight_hidden: torch.Tensor,
     weight_embed: torch.Tensor,
     grad_weight_hidden: torch.Tensor,
     grad_weight_embed: torch.Tensor,
 ) -> None:
-    """Accumulate partial fused-weight gradients into both unfused weights.
-
-    ``grad_weight_hidden`` and ``grad_weight_embed`` are FP32 accumulation
-    buffers and are updated in place. The function returns ``None``.
-    """
-
-    require_ascend()
     _check_tensor('grad_w_partial', grad_w_partial, dtype=torch.float32)
     _check_tensor('weight_hidden', weight_hidden, dtype=torch.bfloat16, device=grad_w_partial.device)
     _check_tensor('weight_embed', weight_embed, dtype=torch.bfloat16, device=grad_w_partial.device)
@@ -77,7 +70,59 @@ def engram_grad_w_reduce(
         if tensor.shape != expected_shape:
             raise ValueError(f'{name} must have shape {expected_shape}, got {tuple(tensor.shape)}.')
 
+
+def _engram_grad_w_reduce_impl(
+    grad_w_partial: torch.Tensor,
+    weight_hidden: torch.Tensor,
+    weight_embed: torch.Tensor,
+    grad_weight_hidden: torch.Tensor,
+    grad_weight_embed: torch.Tensor,
+) -> None:
+    require_ascend()
+    _validate_inputs(grad_w_partial, weight_hidden, weight_embed, grad_weight_hidden, grad_weight_embed)
+    num_partials, hc_mult, hidden_size = grad_w_partial.shape
     kernel = get_engram_grad_w_reduce_kernel(hidden_size, num_partials, hc_mult)
     if should_print_kernel_source():
         print(kernel.get_kernel_source())
     kernel(grad_w_partial, weight_hidden, weight_embed, grad_weight_hidden, grad_weight_embed)
+
+
+@torch.library.custom_op(
+    'cann_ops_tilelang::engram_grad_w_reduce',
+    mutates_args=('grad_weight_hidden', 'grad_weight_embed'),
+)
+def _compiled_engram_grad_w_reduce(
+    grad_w_partial: torch.Tensor,
+    weight_hidden: torch.Tensor,
+    weight_embed: torch.Tensor,
+    grad_weight_hidden: torch.Tensor,
+    grad_weight_embed: torch.Tensor,
+) -> None:
+    _engram_grad_w_reduce_impl(grad_w_partial, weight_hidden, weight_embed, grad_weight_hidden, grad_weight_embed)
+
+
+@_compiled_engram_grad_w_reduce.register_fake
+def _engram_grad_w_reduce_fake(
+    grad_w_partial: torch.Tensor,
+    weight_hidden: torch.Tensor,
+    weight_embed: torch.Tensor,
+    grad_weight_hidden: torch.Tensor,
+    grad_weight_embed: torch.Tensor,
+) -> None:
+    _validate_inputs(grad_w_partial, weight_hidden, weight_embed, grad_weight_hidden, grad_weight_embed)
+
+
+def engram_grad_w_reduce(
+    grad_w_partial: torch.Tensor,
+    weight_hidden: torch.Tensor,
+    weight_embed: torch.Tensor,
+    grad_weight_hidden: torch.Tensor,
+    grad_weight_embed: torch.Tensor,
+) -> None:
+    """Accumulate into both FP32 gradient buffers in place and return None."""
+    if torch.compiler.is_compiling():
+        _compiled_engram_grad_w_reduce(
+            grad_w_partial, weight_hidden, weight_embed, grad_weight_hidden, grad_weight_embed
+        )
+    else:
+        _engram_grad_w_reduce_impl(grad_w_partial, weight_hidden, weight_embed, grad_weight_hidden, grad_weight_embed)
