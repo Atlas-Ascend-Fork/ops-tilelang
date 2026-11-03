@@ -164,3 +164,28 @@ def test_cast_back_benchmark(benchmark_timer, benchmark_record, params):
         time_us=t_us,
         bandwidth_gbs=num_bytes / t_us / 1e3,
     )
+
+
+@pytest.mark.parametrize('fmt', ['e4m3', 'e2m1'])
+@torch.inference_mode()
+def test_per_token_cast_compile_then_cast_back(fmt):
+    x = torch.randn((31, 512), dtype=torch.bfloat16, device=get_device())
+
+    def model(value):
+        sf = cann_ops_tilelang.per_token_cast_with_sf_only(value, fmt, 32, round_sf=True)
+        data = cann_ops_tilelang.per_token_cast_with_precomputed_sf(value, fmt, 32, sf, round_sf=True)
+        return data, sf
+
+    compiled = torch.compile(model, backend='npugraph_ex', fullgraph=True, dynamic=False)
+    for step in range(3):
+        if step == 1:
+            x.neg_().add_(0.125)
+        elif step == 2:
+            x = torch.randn_like(x)
+        reference = cast(x, fmt, (1, 32), round_sf=True)
+        data, sf = compiled(x)
+        assert_equal(data, reference[0])
+        assert_equal(sf, reference[1])
+        restored = cann_ops_tilelang.per_token_cast_back((data, sf), 'fp32', num_per_channels=32)
+        assert_equal(restored, cast_back(reference, 'fp32', (1, 32)))
+        del data, sf

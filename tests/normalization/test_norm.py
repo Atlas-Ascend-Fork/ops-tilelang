@@ -409,3 +409,30 @@ def test_norm_fp8_cast_benchmark(
         time_us=t_us,
         extras={'bandwidth_gbs': io_bytes / 1e9 / (t_us / 1e6)},
     )
+
+
+@torch.inference_mode()
+def test_norm_per_token_cast_compile_composition():
+    from tests.quant.cast_ref import cast
+    from tests.testing.numeric import assert_equal
+
+    x = torch.randn((31, 512), dtype=torch.bfloat16, device=get_device())
+    weight = torch.randn((512,), dtype=torch.bfloat16, device=x.device)
+
+    def model(value, norm_weight):
+        normalized = rms_norm_ref(value, norm_weight, 1e-6)
+        return per_token_cast(normalized, 'e4m3', 32, round_sf=True)
+
+    compiled = torch.compile(model, backend='npugraph_ex', fullgraph=True, dynamic=False)
+    for step in range(3):
+        if step == 1:
+            x.neg_().add_(0.125)
+            weight.neg_()
+        elif step == 2:
+            x = torch.randn_like(x)
+            weight = torch.randn_like(weight)
+        expected = cast(rms_norm_ref(x, weight, 1e-6), 'e4m3', (1, 32), round_sf=True)
+        outputs = compiled(x, weight)
+        for actual, reference in zip(outputs, expected, strict=True):
+            assert_equal(actual, reference)
+        del outputs, actual

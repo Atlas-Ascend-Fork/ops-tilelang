@@ -1,3 +1,4 @@
+import logging
 import math
 import os
 
@@ -559,3 +560,502 @@ def test_vllm_per_token_cast_benchmark(benchmark_timer, benchmark_record, params
         time_us=t_us,
         bandwidth_gbs=num_bytes / t_us / 1e3,
     )
+
+
+logger = logging.getLogger(__name__)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_compile_cache(request):
+    # Each parameter case builds an independent graph; retain disk JIT caches.
+    if 'compile' in request.node.name:
+        torch.compiler.reset()
+    yield
+    if 'compile' in request.node.name:
+        torch.compiler.reset()
+
+
+def _compiled():
+    return torch.compile(cann_ops_tilelang.per_token_cast, backend='npugraph_ex', fullgraph=True, dynamic=False)
+
+
+def _reference(x, kw):
+    return cast(
+        x,
+        kw['fmt'],
+        block_size=(1, kw['num_per_channels']),
+        x_block_size=kw.get('x_block_size'),
+        round_sf=kw.get('round_sf', False),
+        use_tma_aligned_col_major_sf=kw.get('use_tma_aligned_col_major_sf', False),
+        use_packed_ue8m0=kw.get('use_packed_ue8m0', False),
+    )
+
+
+def _check(actual, expected, hidden, group, packed):
+    assert isinstance(actual, tuple) and len(actual) == 2
+    for value, reference in zip(actual, expected, strict=True):
+        assert value.shape == reference.shape
+        assert value.dtype == reference.dtype
+        assert value.device == reference.device
+        if value.numel():
+            assert value.stride() == reference.stride()
+        assert value.storage_offset() == 0
+    assert_equal(actual[0], expected[0])
+    sf, ref_sf = actual[1], expected[1]
+    if packed:
+        groups = (hidden + group - 1) // group
+
+        def valid_bytes(scale):
+            if scale.numel() == 0:
+                return scale.contiguous().flatten().view(torch.uint8)
+            # Both layouts return packed channel-group pairs per token.
+            # Make a snapshot before dropping the unused padding byte.
+            return scale.contiguous().view(torch.uint8)[:, :groups]
+
+        sf = valid_bytes(sf)
+        ref_sf = valid_bytes(ref_sf)
+    assert_equal(sf, ref_sf)
+
+
+@pytest.mark.parametrize('fmt', ['e4m3', 'e2m1'])
+@pytest.mark.parametrize('tma', [False, True], ids=['row', 'column'])
+@pytest.mark.parametrize('packed', [False, True], ids=['fp32-sf', 'packed-sf'])
+@pytest.mark.parametrize('tokens', [0, 31])
+@torch.inference_mode()
+def test_per_token_cast_compile_layout(fmt, tma, packed, tokens):
+    hidden, group = 176, 16
+    x = torch.randn((tokens, hidden), dtype=torch.bfloat16, device=get_device())
+    kw = dict(fmt=fmt, num_per_channels=group, round_sf=True, use_tma_aligned_col_major_sf=tma, use_packed_ue8m0=packed)
+    compiled = _compiled()
+    groups = (hidden + group - 1) // group
+    for step in range(3):
+        if step == 1:
+            x.mul_(-1.25).add_(0.125)
+        elif step == 2:
+            x = torch.randn_like(x)
+        before = x.clone()
+        expected = _reference(x, kw)
+        result = compiled(x, **kw)
+        _check(result, expected, hidden, group, packed)
+        packed_shape = (tokens, (groups + 1) // 2)
+        shape = packed_shape if packed else (tokens, groups)
+        assert result[1].shape == shape
+        assert result[1].stride() == ((1, shape[0]) if tma else (shape[1], 1))
+        assert_equal(x, before)
+        del result
+
+
+@pytest.mark.parametrize('dtype', [torch.bfloat16, torch.float32])
+@torch.inference_mode()
+def test_per_token_cast_compile_strided(dtype):
+    hidden, group = 576, 32
+    backing = torch.randn((31, hidden * 2), dtype=dtype, device=get_device())
+    kw = dict(fmt='e4m3', num_per_channels=group, round_sf=False)
+    compiled = _compiled()
+    for step in range(3):
+        if step == 2:
+            backing = torch.randn_like(backing)
+        x = backing[:, :hidden]
+        if step == 1:
+            x.neg_().add_(0.25)
+        before = backing.clone()
+        expected = _reference(x, kw)
+        result = compiled(x, **kw)
+        _check(result, expected, hidden, group, False)
+        assert x.stride() == (hidden * 2, 1)
+        assert_equal(backing, before)
+        del result
+
+
+def _copy_quantized_source(destination, source):
+    for target, value in zip(destination, source, strict=True):
+        if target.dtype == torch.float8_e4m3fn:
+            target.view(torch.uint8).copy_(value.view(torch.uint8))
+        else:
+            target.copy_(value)
+
+
+@pytest.mark.parametrize(('source_fmt', 'fmt'), [('e4m3', 'e2m1'), ('e2m1', 'e4m3')])
+@pytest.mark.parametrize('source_tma', [False, True])
+@torch.inference_mode()
+def test_per_token_cast_compile_prequantized(source_fmt, fmt, source_tma):
+    hidden, group = 576, 32
+    kw = dict(fmt=fmt, num_per_channels=group, x_block_size=(32, 32), round_sf=True)
+    compiled = _compiled()
+    source = None
+    for step in range(3):
+        original = torch.randn((65, hidden), dtype=torch.bfloat16, device=get_device())
+        refreshed = cast(
+            original,
+            source_fmt,
+            (32, 32),
+            round_sf=True,
+            use_tma_aligned_col_major_sf=source_tma,
+            use_packed_ue8m0=True,
+        )
+        if step == 1:
+            _copy_quantized_source(source, refreshed)
+        else:
+            source = refreshed
+        before = tuple(t.clone() for t in source)
+        before_layout = tuple((t.stride(), t.storage_offset()) for t in source)
+        expected = _reference(source, kw)
+        result = compiled(source, **kw)
+        _check(result, expected, hidden, group, False)
+        for value, snapshot, layout in zip(source, before, before_layout, strict=True):
+            # clone may compact a strided view; compare its values separately.
+            assert_equal(value, snapshot, check_stride=False)
+            assert (value.stride(), value.storage_offset()) == layout
+        del result
+
+
+@pytest.mark.parametrize(
+    ('fmt', 'packed', 'raw_sf'),
+    [
+        ('e4m3', False, False),
+        ('e2m1', True, False),
+        ('e4m3', True, True),
+    ],
+)
+@torch.inference_mode()
+def test_per_token_cast_compile_out(fmt, packed, raw_sf):
+    hidden, group = 512, 32
+    x = torch.randn((31, hidden), dtype=torch.bfloat16, device=get_device())
+    kw = dict(fmt=fmt, num_per_channels=group, round_sf=True, use_packed_ue8m0=packed)
+    expected = _reference(x, kw)
+    out = tuple(torch.empty_like(t) for t in expected)
+    if raw_sf:
+        out = (out[0], out[1].view(torch.uint8))
+    compiled = _compiled()
+    for step in range(3):
+        if step == 1:
+            x.neg_().add_(0.125)
+        elif step == 2:
+            x = torch.randn_like(x)
+            out = tuple(torch.empty_like(t) for t in out)
+        for buffer in out:
+            buffer.view(torch.uint8).fill_(0x5A)
+        before = x.clone()
+        expected = _reference(x, kw)
+        result = compiled(x, **kw, out=out)
+        _check(result, expected, hidden, group, packed)
+        assert result[0] is out[0]
+        assert result[0].data_ptr() == out[0].data_ptr()
+        assert result[1].data_ptr() == out[1].data_ptr()
+        sf_view = out[1].view(torch.int16) if packed else out[1]
+        _check((out[0], sf_view), expected, hidden, group, packed)
+        assert_equal(x, before)
+        del result
+
+
+@torch.inference_mode()
+def test_per_token_cast_compile_stochastic():
+    # Kernel randomness is derived from inputs/indexes, not a new RNG seed per call.
+    x = torch.randn((31, 512), dtype=torch.float32, device=get_device())
+    kw = dict(fmt='e4m3', num_per_channels=512, round_sf=True, stochastic_cast=True)
+    compiled = _compiled()
+    for step in range(3):
+        if step == 1:
+            x.neg_().add_(0.125)
+        elif step == 2:
+            x = torch.randn_like(x)
+        expected = cann_ops_tilelang.per_token_cast(x, **kw)
+        for _ in range(2):
+            result = compiled(x, **kw)
+            _check(result, expected, 512, 512, False)
+            del result
+
+
+@torch.inference_mode()
+def test_per_token_cast_compile_config_change():
+    x = torch.zeros((31, 512), dtype=torch.bfloat16, device=get_device())
+    kw = dict(fmt='e4m3', num_per_channels=128, round_sf=False)
+    default = get_amax_clamp_for_quant('e4m3')
+    compiled = _compiled()
+    try:
+        for clamp in (default, 1e6, default):
+            set_amax_clamp_for_quant('e4m3', clamp)
+            expected = _reference(x, kw)
+            result = compiled(x, **kw)
+            _check(result, expected, 512, 128, False)
+            del result
+    finally:
+        set_amax_clamp_for_quant('e4m3', default)
+
+
+@pytest.mark.parametrize('fmt', ['e4m3', 'e2m1'])
+@pytest.mark.parametrize('with_out', [False, True], ids=['allocate', 'out'])
+def test_per_token_cast_compile_opcheck(with_out, fmt):
+    x = torch.randn((31, 512), dtype=torch.bfloat16, device=get_device())
+    args = (x, None, fmt, 32, None, [False, True, False, False], get_amax_clamp_for_quant(fmt))
+    op = torch.ops.cann_ops_tilelang.per_token_cast.default
+    if with_out:
+        dtype = torch.float8_e4m3fn if fmt == 'e4m3' else torch.int8
+        width = 512 if fmt == 'e4m3' else 256
+        args += (
+            torch.empty((31, width), dtype=dtype, device=x.device),
+            torch.empty((31, 16), dtype=torch.float32, device=x.device),
+        )
+        op = torch.ops.cann_ops_tilelang.per_token_cast_out.default
+    # TorchNPU isclose cannot compare FP8 inputs inside PyTorch's schema checker.
+    # FP4 covers the same mutation schema; FP8 writes/aliases are byte-checked above.
+    checks = ('test_faketensor',) if with_out and fmt == 'e4m3' else ('test_schema', 'test_faketensor')
+    torch.library.opcheck(op, args, test_utils=checks)
+
+
+@pytest.mark.parametrize('with_out', [False, True], ids=['allocate', 'out'])
+@torch.inference_mode()
+def test_per_token_cast_compile_replay(with_out):
+    x = torch.randn((31, 512), dtype=torch.bfloat16, device=get_device())
+    kw = dict(fmt='e4m3', num_per_channels=32, round_sf=True)
+    if with_out:
+        kw['out'] = (
+            torch.empty_like(x, dtype=torch.float8_e4m3fn),
+            torch.empty((31, 16), dtype=torch.float32, device=x.device),
+        )
+    compiled = _compiled()
+    records = []
+    for step in range(3):
+        if step:
+            x.neg_().add_(0.125)
+        expected = _reference(x, kw)
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]) as profile:
+            result = compiled(x, **kw)
+            torch.npu.synchronize()
+        events = {event.key: event.count for event in profile.key_averages()}
+        counts = {name: events.get(name, 0) for name in ('acl_graph_capture', 'acl_graph_replay', 'fx_run_eagerly')}
+        records.append(counts)
+        logger.info('graph call %s: %s', step, counts)
+        _check(result, expected, 512, 32, False)
+        del result
+    assert sum(e['acl_graph_capture'] for e in records) > 0, records
+    assert records[-1]['acl_graph_replay'] > 0, records
+    assert records[-1]['acl_graph_capture'] == 0, records
+    assert records[-1]['fx_run_eagerly'] == 0, records
+
+
+@pytest.mark.parametrize('fmt', ['e4m3', 'e2m1'])
+@pytest.mark.parametrize('tma', [False, True])
+@pytest.mark.parametrize('packed', [False, True])
+def test_per_token_cast_compile_fake_layout(fmt, tma, packed):
+    x = torch.randn((31, 176), dtype=torch.bfloat16, device=get_device())
+    args = (x, None, fmt, 16, None, [tma, True, packed, False], get_amax_clamp_for_quant(fmt))
+    torch.library.opcheck(torch.ops.cann_ops_tilelang.per_token_cast.default, args, test_utils=('test_faketensor',))
+
+
+@torch.inference_mode()
+def test_per_token_cast_compile_composition():
+    def model(x):
+        data, scale = cann_ops_tilelang.per_token_cast(x + 0.25, 'e4m3', 32, round_sf=True)
+        return (data.float() * scale.repeat_interleave(32, dim=1)).sum(dim=1)
+
+    x = torch.randn((31, 512), dtype=torch.bfloat16, device=get_device())
+    compiled = torch.compile(model, backend='npugraph_ex', fullgraph=True, dynamic=False)
+    for step in range(3):
+        if step == 1:
+            x.neg_().add_(0.125)
+        elif step == 2:
+            x = torch.randn_like(x)
+        data, scale = cast(x + 0.25, 'e4m3', (1, 32), round_sf=True)
+        expected = (data.float() * scale.repeat_interleave(32, dim=1)).sum(dim=1)
+        result = compiled(x)
+        assert_equal(result, expected)
+        del result
+
+
+def _raw_precomputed_scale(scale, tma, packed):
+    # The existing cast-only implementation passes sf directly to the kernel.
+    raw = scale.T if tma else scale
+    return raw.view(torch.uint8) if packed else raw
+
+
+@pytest.mark.parametrize('entry', ['sf_only', 'precomputed'])
+@pytest.mark.parametrize('fmt', ['e4m3', 'e2m1'])
+@pytest.mark.parametrize('tma', [False, True])
+@pytest.mark.parametrize('packed', [False, True])
+@pytest.mark.parametrize('tokens', [0, 31])
+@torch.inference_mode()
+def test_per_token_cast_variants_compile_layout(entry, fmt, tma, packed, tokens):
+    x = torch.randn((tokens, 176), dtype=torch.bfloat16, device=get_device())
+    kw = dict(fmt=fmt, num_per_channels=16, round_sf=True, use_tma_aligned_col_major_sf=tma, use_packed_ue8m0=packed)
+    op = (
+        cann_ops_tilelang.per_token_cast_with_sf_only
+        if entry == 'sf_only'
+        else cann_ops_tilelang.per_token_cast_with_precomputed_sf
+    )
+    compiled = torch.compile(op, backend='npugraph_ex', fullgraph=True, dynamic=False)
+    sf_buffer = None
+    for step in range(3):
+        if step == 1:
+            x.neg_().add_(0.125)
+        elif step == 2:
+            x = torch.randn_like(x)
+        before = x.clone()
+        reference = _reference(x, kw)
+        if entry == 'sf_only':
+            result = compiled(x, **kw)
+            _check((reference[0], result), reference, 176, 16, packed)
+        else:
+            refreshed = _raw_precomputed_scale(reference[1], tma, packed)
+            if step == 1:
+                sf_buffer.copy_(refreshed)
+            else:
+                sf_buffer = refreshed
+            sf_before = sf_buffer.clone()
+            sf_meta = (sf_buffer.shape, sf_buffer.stride(), sf_buffer.storage_offset())
+            result = compiled(x, sf=sf_buffer, **kw)
+            _check((result, reference[1]), reference, 176, 16, packed)
+            assert_equal(sf_buffer, sf_before, check_stride=False)
+            assert (sf_buffer.shape, sf_buffer.stride(), sf_buffer.storage_offset()) == sf_meta
+        assert_equal(x, before)
+        del result
+
+
+@pytest.mark.parametrize('entry', ['sf_only', 'precomputed'])
+@pytest.mark.parametrize(
+    ('fmt', 'packed', 'raw_out'),
+    [
+        ('e4m3', False, False),
+        ('e2m1', True, False),
+        ('e4m3', True, True),
+    ],
+)
+@torch.inference_mode()
+def test_per_token_cast_variants_compile_out(entry, fmt, packed, raw_out):
+    x = torch.randn((31, 512), dtype=torch.bfloat16, device=get_device())
+    kw = dict(fmt=fmt, num_per_channels=32, round_sf=True, use_packed_ue8m0=packed)
+    op = (
+        cann_ops_tilelang.per_token_cast_with_sf_only
+        if entry == 'sf_only'
+        else cann_ops_tilelang.per_token_cast_with_precomputed_sf
+    )
+    compiled = torch.compile(op, backend='npugraph_ex', fullgraph=True, dynamic=False)
+    reference = _reference(x, kw)
+    out = torch.empty_like(reference[1 if entry == 'sf_only' else 0])
+    if entry == 'sf_only' and raw_out:
+        out = out.view(torch.uint8)
+    for step in range(3):
+        if step == 1:
+            x.neg_().add_(0.125)
+        elif step == 2:
+            x = torch.randn_like(x)
+            out = torch.empty_like(out)
+        out.view(torch.uint8).fill_(0x5A)
+        before = x.clone()
+        reference = _reference(x, kw)
+        if entry == 'sf_only':
+            result = compiled(x, out_sf=out, **kw)
+            _check((reference[0], result), reference, 512, 32, packed)
+            assert result.data_ptr() == out.data_ptr()
+        else:
+            sf = _raw_precomputed_scale(reference[1], False, packed)
+            sf_before = sf.clone()
+            result = compiled(x, sf=sf, out=out, **kw)
+            _check((result, reference[1]), reference, 512, 32, packed)
+            assert result is out
+            assert_equal(sf, sf_before)
+        assert_equal(x, before)
+        del result
+
+
+@pytest.mark.parametrize('entry', ['sf_only', 'precomputed'])
+@pytest.mark.parametrize('with_out', [False, True])
+def test_per_token_cast_variants_compile_opcheck(entry, with_out):
+    x = torch.randn((31, 512), dtype=torch.bfloat16, device=get_device())
+    kw = dict(fmt='e2m1', num_per_channels=32, round_sf=True)
+    reference = _reference(x, kw)
+    prefix = 'per_token_cast_with_' + ('sf_only' if entry == 'sf_only' else 'precomputed_sf')
+    args = (x,)
+    if entry == 'precomputed':
+        args += (reference[1],)
+    args += ('e2m1', 32, [False, True, False, False], get_amax_clamp_for_quant('e2m1'))
+    if with_out:
+        args += (torch.empty_like(reference[1 if entry == 'sf_only' else 0]),)
+        prefix += '_out'
+    torch.library.opcheck(
+        getattr(torch.ops.cann_ops_tilelang, prefix).default, args, test_utils=('test_schema', 'test_faketensor')
+    )
+
+
+@pytest.mark.parametrize('entry', ['sf_only', 'precomputed'])
+@pytest.mark.parametrize('with_out', [False, True])
+@torch.inference_mode()
+def test_per_token_cast_variants_compile_replay(entry, with_out):
+    x = torch.randn((31, 512), dtype=torch.bfloat16, device=get_device())
+    kw = dict(fmt='e4m3', num_per_channels=32, round_sf=True)
+    op = (
+        cann_ops_tilelang.per_token_cast_with_sf_only
+        if entry == 'sf_only'
+        else cann_ops_tilelang.per_token_cast_with_precomputed_sf
+    )
+    compiled = torch.compile(op, backend='npugraph_ex', fullgraph=True, dynamic=False)
+    reference = _reference(x, kw)
+    sf = reference[1].clone()
+    out = torch.empty_like(reference[1 if entry == 'sf_only' else 0])
+    records = []
+    for step in range(3):
+        if step:
+            x.neg_().add_(0.125)
+        reference = _reference(x, kw)
+        sf.copy_(reference[1])
+        call_kw = dict(kw)
+        if entry == 'precomputed':
+            call_kw['sf'] = sf
+        if with_out:
+            call_kw['out_sf' if entry == 'sf_only' else 'out'] = out
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]) as profile:
+            result = compiled(x, **call_kw)
+            torch.npu.synchronize()
+        events = {e.key: e.count for e in profile.key_averages()}
+        counts = {name: events.get(name, 0) for name in ('acl_graph_capture', 'acl_graph_replay', 'fx_run_eagerly')}
+        logger.info('%s out=%s call %s: %s', entry, with_out, step, counts)
+        records.append(counts)
+        if entry == 'sf_only':
+            _check((reference[0], result), reference, 512, 32, False)
+        else:
+            _check((result, reference[1]), reference, 512, 32, False)
+            assert_equal(sf, reference[1])
+        del result
+    assert sum(e['acl_graph_capture'] for e in records) > 0, records
+    assert records[-1]['acl_graph_replay'] > 0, records
+    assert records[-1]['acl_graph_capture'] == 0, records
+    assert records[-1]['fx_run_eagerly'] == 0, records
+
+
+@torch.inference_mode()
+def test_per_token_cast_sf_only_compile_config_change():
+    x = torch.zeros((31, 512), dtype=torch.bfloat16, device=get_device())
+    op = cann_ops_tilelang.per_token_cast_with_sf_only
+    compiled = torch.compile(op, backend='npugraph_ex', fullgraph=True, dynamic=False)
+    default = get_amax_clamp_for_quant('e4m3')
+    try:
+        for clamp in (default, 1e6, default):
+            set_amax_clamp_for_quant('e4m3', clamp)
+            reference = cast(x, 'e4m3', (1, 32))
+            result = compiled(x, 'e4m3', 32)
+            assert_equal(result, reference[1])
+            del result
+    finally:
+        set_amax_clamp_for_quant('e4m3', default)
+
+
+@torch.inference_mode()
+def test_per_token_cast_precomputed_compile_scale_updates():
+    x = torch.randn((31, 512), dtype=torch.bfloat16, device=get_device())
+    scale = cast(x, 'e4m3', (1, 32))[1]
+    compiled = torch.compile(
+        cann_ops_tilelang.per_token_cast_with_precomputed_sf, backend='npugraph_ex', fullgraph=True, dynamic=False
+    )
+    for step in range(3):
+        if step == 1:
+            scale.mul_(2)
+        elif step == 2:
+            # Keep provided scales in range: reducing below amax/448 can
+            # overflow FP8 and exercises kernel saturation rather than replay.
+            scale = scale.clone() * 2
+        before = scale.clone()
+        expected = cast(x, 'e4m3', (1, 32), sf=scale)
+        result = compiled(x, 'e4m3', 32, scale)
+        assert_equal(result, expected)
+        assert_equal(scale, before)
+        del result

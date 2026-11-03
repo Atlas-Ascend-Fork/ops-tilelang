@@ -532,3 +532,44 @@ def test_load_kv_cache_llama_benchmark(
         time_us=t_us,
         extras={'bandwidth_gbs': total_bytes / 1000000000.0 / (t_us / 1000000.0)},
     )
+
+
+@torch.inference_mode()
+def test_per_token_cast_compile_cache_layout():
+    # Compile quantization only; cache APIs themselves are outside this change.
+    from tests.testing.numeric import assert_equal
+
+    x = torch.randn((31, 512), dtype=torch.bfloat16, device=get_device())
+    slots = torch.arange(31, dtype=torch.int32, device=x.device)
+    cache = torch.empty((4, 32, 1, 528), dtype=torch.uint8, device=x.device)
+
+    def quantize(value):
+        return per_token_cast(value, 'e4m3', 32, round_sf=True, use_packed_ue8m0=True)
+
+    compiled = torch.compile(quantize, backend='npugraph_ex', fullgraph=True, dynamic=False)
+    for step in range(3):
+        if step == 1:
+            x.neg_().add_(0.125)
+        elif step == 2:
+            x = torch.randn_like(x)
+        cache.fill_(0x5A)
+        expected_data, expected_sf = torch_cast(
+            x,
+            'e4m3',
+            (1, 32),
+            round_sf=True,
+            use_packed_ue8m0=True,
+        )
+        data, scale = compiled(x)
+        assert_equal(data, expected_data)
+        assert_equal(scale, expected_sf)
+        store_kv_cache(x.unsqueeze(1), cache, slots, use_fp8_rope=True, num_per_channels=32)
+        raw = cache.view(4, 32 * 528)
+        data_bytes_per_block = 32 * 512
+        stored_data = raw[:, :data_bytes_per_block].view(4, 32, 512)
+        stored_sf = raw[:, data_bytes_per_block:].view(4, 32, 16)
+        assert_equal(stored_data[0, :31], data.view(torch.uint8))
+        assert_equal(stored_sf[0, :31], scale.view(torch.uint8))
+        assert torch.all(stored_data[0, 31] == 0x5A)
+        assert torch.all(stored_sf[0, 31] == 0x5A)
+        del data, scale
