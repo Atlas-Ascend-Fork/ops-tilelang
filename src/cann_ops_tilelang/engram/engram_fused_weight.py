@@ -52,16 +52,6 @@ def _engram_fused_weight_impl(
 
 
 @torch.library.custom_op('cann_ops_tilelang::engram_fused_weight', mutates_args=())
-def _compiled_fused_weight(weight_hidden: torch.Tensor, weight_embed: torch.Tensor) -> torch.Tensor:
-    return _engram_fused_weight_impl(weight_hidden, weight_embed)
-
-
-@_compiled_fused_weight.register_fake
-def _fused_weight_fake(weight_hidden, weight_embed):
-    _validate_inputs(weight_hidden, weight_embed)
-    return torch.empty_like(weight_hidden, dtype=torch.float32)
-
-
 def engram_fused_weight(
     weight_hidden: torch.Tensor,
     weight_embed: torch.Tensor,
@@ -79,6 +69,10 @@ def engram_fused_weight(
     tracing does not compile or launch the TileLang kernel. Shapes specialize
     at compilation. No autograd formula is registered for this operator.
     """
-    if torch.compiler.is_compiling():
-        return _compiled_fused_weight(weight_hidden, weight_embed)
     return _engram_fused_weight_impl(weight_hidden, weight_embed)
+
+
+@engram_fused_weight.register_fake
+def _engram_fused_weight_fake(weight_hidden, weight_embed):
+    _validate_inputs(weight_hidden, weight_embed)
+    return torch.empty_like(weight_hidden, dtype=torch.float32)
