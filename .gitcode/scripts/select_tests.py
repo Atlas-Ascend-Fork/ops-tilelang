@@ -76,6 +76,40 @@ def _normalize(path: str) -> str:
     return str(parsed)
 
 
+def _file_spec_references(nodes: list[ast.AST], parents: dict[ast.AST, ast.AST]) -> list[ast.AST]:
+    """Find file-spec APIs/aliases whose loaded imports cannot be resolved statically."""
+    bindings: dict[str, set[str]] = defaultdict(set)
+    found = []
+    for node in nodes:
+        if isinstance(node, ast.Import):
+            for item in node.names:
+                name = item.asname or item.name.split('.')[0]
+                bindings[name].add(item.name if item.asname else name)
+        elif isinstance(node, ast.ImportFrom) and not node.level and node.module:
+            for item in node.names:
+                if item.name == '*' and node.module == 'importlib.util':
+                    found.append(node)
+                bindings[item.asname or item.name].add(f'{node.module}.{item.name}')
+    for node in nodes:
+        if isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load):
+            continue
+        root, attributes = node, []
+        while isinstance(root, ast.Attribute):
+            attributes.append(root.attr)
+            root = root.value
+        if not isinstance(root, ast.Name):
+            continue
+        suffix = ''.join('.' + name for name in reversed(attributes))
+        qualified = {name + suffix for name in bindings.get(root.id, ())}
+        parent = parents.get(node)
+        nested_attribute = isinstance(parent, ast.Attribute) and parent.value is node
+        if 'importlib.util.spec_from_file_location' in qualified or (
+            qualified.intersection({'importlib', 'importlib.util'}) and not nested_attribute
+        ):
+            found.append(node)
+    return found
+
+
 class DependencyGraph:
     """Track file dependencies, resolving package exports to their definitions.
 
@@ -186,6 +220,8 @@ class DependencyGraph:
         importlib_names = {'importlib'}
         nodes = list(ast.walk(tree))
         parents = {child: parent for parent in nodes for child in ast.iter_child_nodes(parent)}
+        for node in _file_spec_references(nodes, parents):
+            self.problems.append(f'{path}:{getattr(node, "lineno", 0)}: dynamic Python file-spec import')
 
         def depend(reference: Reference, node: ast.AST) -> str | None:
             try:

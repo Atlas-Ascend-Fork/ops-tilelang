@@ -247,6 +247,71 @@ class SelectTestsTests(unittest.TestCase):
                 # The existing direct consumer must not mask this dynamic one.
                 self.assert_selection(['src/cann_ops_tilelang/ops/foo.py'], 'full', ['tests'])
 
+    def test_file_spec_imports_cannot_hide_affected_tests(self):
+        self.write('src/cann_ops_tilelang/ops/foo.py', 'def foo():\n    return 1\n')
+        aliases = (
+            (
+                'qualified',
+                'import importlib.util',
+                'importlib.util.spec_from_file_location',
+                'importlib.util.module_from_spec',
+            ),
+            ('module_alias', 'import importlib.util as util', 'util.spec_from_file_location', 'util.module_from_spec'),
+            (
+                'assigned_root_alias',
+                'import importlib.util\nil = importlib',
+                'il.util.spec_from_file_location',
+                'il.util.module_from_spec',
+            ),
+            (
+                'assigned_root_import_alias',
+                'import importlib.util\nimport importlib as root\nil = root',
+                'il.util.spec_from_file_location',
+                'il.util.module_from_spec',
+            ),
+            (
+                'from_function_alias',
+                'from importlib.util import spec_from_file_location as make_spec, module_from_spec',
+                'make_spec',
+                'module_from_spec',
+            ),
+            (
+                'from_namespace_alias',
+                'from importlib import util as loader_util',
+                'loader_util.spec_from_file_location',
+                'loader_util.module_from_spec',
+            ),
+            (
+                'assigned_function_alias',
+                'import importlib.util\nmake_spec = importlib.util.spec_from_file_location',
+                'make_spec',
+                'importlib.util.module_from_spec',
+            ),
+        )
+        for name, imports, factory, construct in aliases:
+            with self.subTest(alias=name):
+                consumer = (
+                    imports + '\nfrom pathlib import Path\n\ndef test_file_loader():\n'
+                    '    path = Path(__file__).resolve().parents[1] / "src/cann_ops_tilelang/ops/foo.py"\n'
+                    f'    spec = {factory}("cann_ops_tilelang.ops.foo", path)\n'
+                    f'    module = {construct}(spec)\n'
+                    '    spec.loader.exec_module(module)\n'
+                    '    assert module.foo() == 1\n'
+                )
+                self.write('tests/test_file_loader.py', consumer)
+                self.assert_selection(['src/cann_ops_tilelang/ops/foo.py'], 'full', ['tests'])
+
+    def test_external_spec_lookup_and_imports_remain_incremental(self):
+        consumers = (
+            'import json\njson.loads("{}")\n',
+            'import importlib\nimportlib.import_module("json")\n',
+            'import importlib.util\nimportlib.util.find_spec("json")\n',
+        )
+        for consumer in consumers:
+            with self.subTest(consumer=consumer):
+                self.write('tests/test_metadata.py', consumer)
+                self.assert_selection(['src/cann_ops_tilelang/ops/foo.py'], 'incremental', ['tests/test_foo.py'])
+
     def test_package_namespace_assignment_runs_full_scope(self):
         self.write(
             'tests/test_namespace.py',
