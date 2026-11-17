@@ -4,6 +4,7 @@ import pytest
 import torch
 
 import cann_ops_tilelang
+from cann_ops_tilelang import config
 from cann_ops_tilelang.config import get_device
 from tests.engram.engram_gate_ref import compile_gate_for_test, engram_gate_ref, update_gate_inputs
 from tests.testing.bench import make_param_id
@@ -178,6 +179,50 @@ def test_engram_gate_bwd_compile(num_tokens):
         _assert_compile_gradients(actuals, references, step)
         # Release graph outputs before their storage is reused by the next call.
         del outputs, actuals
+
+
+@pytest.mark.parametrize('num_tokens', [0, 128])
+def test_engram_gate_bwd_compile_core_config(num_tokens, monkeypatch):
+    torch.compiler.reset()
+    try:
+        monkeypatch.delenv('OPS_TILELANG_NUM_VECTOR_CORES', raising=False)
+        config.clear_runtime_caches()
+        x_data, kv_data, wh_data, we_data, weight_fused, grad_out, eps, clamp_value = generate_test_data(
+            {'num_tokens': num_tokens, 'hc': 4, 'hidden': 4096}
+        )
+        dot, gate_score, rstd_x, rstd_k, references = _backward_compile_reference(
+            x_data, kv_data, wh_data, we_data, grad_out, eps, clamp_value
+        )
+        default_ai_cores = config.get_num_ai_cores()
+        compiled = compile_gate_for_test(cann_ops_tilelang.engram_gate_bwd)
+        phases = ('default', 'reduced', 'same', 'reset', 'cap', 'changed_cap', 'unset')
+        for step, phase in enumerate(phases):
+            if phase in ('reduced', 'same'):
+                config.set_num_ai_cores(default_ai_cores - 2)
+            elif phase == 'reset':
+                config.reset_runtime_config()
+            elif phase in ('cap', 'changed_cap'):
+                reduction = 8 if phase == 'cap' else 12
+                monkeypatch.setenv('OPS_TILELANG_NUM_VECTOR_CORES', str(2 * default_ai_cores - reduction))
+                config.clear_runtime_caches()
+            elif phase == 'unset':
+                monkeypatch.delenv('OPS_TILELANG_NUM_VECTOR_CORES')
+                config.clear_runtime_caches()
+            num_cores = config.get_num_vector_cores()
+            # Reuse one compiled object without manually resetting the compiler.
+            with torch.inference_mode():
+                outputs = compiled(
+                    grad_out, x_data, kv_data, weight_fused, dot, gate_score, rstd_x, rstd_k, clamp_value
+                )
+                assert outputs[2].shape == ((num_cores - 12) // 2, 4, 4096)
+                actuals = _reduce_compile_gradients(outputs, wh_data, we_data)
+            if num_tokens == 0:
+                assert torch.count_nonzero(outputs[2]).item() == 0
+            _assert_compile_gradients(actuals, references, step)
+            del outputs, actuals
+    finally:
+        config.reset_runtime_config()
+        torch.compiler.reset()
 
 
 @pytest.mark.benchmark

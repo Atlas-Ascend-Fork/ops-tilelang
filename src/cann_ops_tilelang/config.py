@@ -23,6 +23,17 @@ _DEFAULT_QUANT_CLAMP_MIN_VALUES = {
 _num_ai_cores_override: int | None = None
 _token_alignment = _DEFAULT_TOKEN_ALIGNMENT
 _quant_clamp_min_values = _DEFAULT_QUANT_CLAMP_MIN_VALUES.copy()
+# Read only configuration metadata here; importing this module stays device-free.
+_compiler_core_config = (_num_ai_cores_override, os.getenv(_NUM_VECTOR_CORES_ENV))
+
+
+def _reset_compiler_on_core_config_change() -> None:
+    global _compiler_core_config
+    current = (_num_ai_cores_override, os.getenv(_NUM_VECTOR_CORES_ENV))
+    if current != _compiler_core_config:
+        # Opaque custom ops cannot guard their internal tuning configuration.
+        torch.compiler.reset()
+        _compiler_core_config = current
 
 
 @lru_cache(maxsize=1)
@@ -66,7 +77,11 @@ def get_num_ai_cores(device_index: int | None = None) -> int:
 
 
 def set_num_ai_cores(num_ai_cores: int) -> None:
-    """Override the AI core count used for kernel tuning in tests and experiments."""
+    """Override the AI core count and invalidate compiled graphs when it changes.
+
+    Existing compiled callables recompile on their next call. Invalidation is
+    process-wide; update tuning settings outside compiled calls.
+    """
 
     if isinstance(num_ai_cores, bool) or not isinstance(num_ai_cores, int):
         raise TypeError('num_ai_cores must be an integer.')
@@ -83,6 +98,7 @@ def set_num_ai_cores(num_ai_cores: int) -> None:
     _num_ai_cores_override = num_ai_cores
     get_num_ai_cores.cache_clear()
     get_num_vector_cores.cache_clear()
+    _reset_compiler_on_core_config_change()
 
 
 @cache
@@ -150,7 +166,7 @@ def set_amax_clamp_for_quant(fmt: str, clamp_min_value: float) -> None:
 
 
 def reset_runtime_config() -> None:
-    """Reset mutable quantization tuning settings to their defaults."""
+    """Reset runtime tuning settings and invalidate graphs if core settings change."""
 
     global _num_ai_cores_override, _token_alignment, _quant_clamp_min_values
     _num_ai_cores_override = None
@@ -160,8 +176,13 @@ def reset_runtime_config() -> None:
 
 
 def clear_runtime_caches() -> None:
-    """Clear lazily cached hardware queries, mainly for tests."""
+    """Clear hardware queries and invalidate graphs after core configuration changes.
+
+    Call this after changing OPS_TILELANG_NUM_VECTOR_CORES. Repeated calls with
+    unchanged core settings retain the compiler cache.
+    """
 
     is_ascend_available.cache_clear()
     get_num_ai_cores.cache_clear()
     get_num_vector_cores.cache_clear()
+    _reset_compiler_on_core_config_change()
