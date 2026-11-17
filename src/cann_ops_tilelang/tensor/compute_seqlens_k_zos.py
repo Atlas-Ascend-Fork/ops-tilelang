@@ -7,7 +7,14 @@ from cann_ops_tilelang.config import get_num_vector_cores, require_ascend, shoul
 from .compute_seqlens_k_zos_kernel import get_compute_seqlens_k_zos_kernel
 
 
-def compute_seqlens_k_zos(
+def _validate_nextn(nextn: int) -> None:
+    if not isinstance(nextn, int) or isinstance(nextn, bool):
+        raise TypeError('nextn must be an integer.')
+    if nextn < 0:
+        raise ValueError(f'nextn must be non-negative, got {nextn}.')
+
+
+def _validate_inputs(
     seqlens_k: torch.Tensor,
     seqlens_q: torch.Tensor,
     remap: torch.Tensor,
@@ -15,16 +22,12 @@ def compute_seqlens_k_zos(
     *,
     nextn: int,
 ) -> None:
-    """Update ``seqlens_k`` in place for a ZOS decode step on Ascend."""
+    """Validate metadata without inspecting the runtime or tensor data."""
     tensors = (seqlens_k, seqlens_q, remap, prev_num_accepted_tokens)
     if not all(isinstance(tensor, torch.Tensor) for tensor in tensors):
         raise TypeError('all inputs must be torch.Tensor instances.')
-    if not isinstance(nextn, int) or isinstance(nextn, bool):
-        raise TypeError('nextn must be an integer.')
-    if nextn < 0:
-        raise ValueError(f'nextn must be non-negative, got {nextn}.')
+    _validate_nextn(nextn)
 
-    require_ascend()
     if seqlens_k.ndim != 1:
         raise ValueError('seqlens_k must be a 1D tensor.')
     if seqlens_q.ndim != 1:
@@ -50,12 +53,52 @@ def compute_seqlens_k_zos(
     if seqlens_k.device.type != 'npu':
         raise ValueError(f'all inputs must be NPU tensors, got {seqlens_k.device}.')
 
+
+def _compute_seqlens_k_zos_impl(
+    seqlens_k: torch.Tensor,
+    seqlens_q: torch.Tensor,
+    remap: torch.Tensor,
+    prev_num_accepted_tokens: torch.Tensor,
+    *,
+    nextn: int,
+) -> None:
+    _validate_inputs(seqlens_k, seqlens_q, remap, prev_num_accepted_tokens, nextn=nextn)
+    require_ascend()
     num_blocks = (seqlens_k.numel() + 127) // 128
     num_cores = min(1 << (num_blocks - 1).bit_length(), get_num_vector_cores())
     kernel = get_compute_seqlens_k_zos_kernel(nextn, num_cores)
     if should_print_kernel_source():
         print(kernel.get_kernel_source())
     kernel(seqlens_k, seqlens_q, remap, prev_num_accepted_tokens)
+
+
+@torch.library.custom_op('cann_ops_tilelang::compute_seqlens_k_zos', mutates_args=('seqlens_k',))
+def compute_seqlens_k_zos(
+    seqlens_k: torch.Tensor,
+    seqlens_q: torch.Tensor,
+    remap: torch.Tensor,
+    prev_num_accepted_tokens: torch.Tensor,
+    *,
+    nextn: int,
+) -> None:
+    """Update ``seqlens_k`` in place for a ZOS decode step on Ascend.
+
+    Only ``seqlens_k`` is modified; the other tensors are read-only. The return
+    value is always ``None``. All tensors must be non-empty, contiguous 1D int32
+    tensors on the same NPU, with the first three tensors having equal shapes.
+
+    Supports fixed-shape ``torch.compile(..., backend='npugraph_ex',
+    fullgraph=True, dynamic=False)`` with a compatible torch_npu. The custom op
+    declares the mutation and its fake implementation only validates metadata.
+    ``nextn`` must be a non-negative integer.
+    """
+    _compute_seqlens_k_zos_impl(seqlens_k, seqlens_q, remap, prev_num_accepted_tokens, nextn=nextn)
+
+
+@compute_seqlens_k_zos.register_fake
+def _compute_seqlens_k_zos_fake(seqlens_k, seqlens_q, remap, prev_num_accepted_tokens, *, nextn):
+    _validate_inputs(seqlens_k, seqlens_q, remap, prev_num_accepted_tokens, nextn=nextn)
+    return None
 
 
 def compute_seqlens_k_zos_ref(
