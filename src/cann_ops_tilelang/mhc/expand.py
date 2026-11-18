@@ -1,10 +1,34 @@
+# MIT License
+#
+# Copyright (c) 2026 DeepSeek
+# Copyright (c) 2026 ops-tilelang contributors
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
 """Public interfaces for expanding activations across MHC streams."""
 
 from __future__ import annotations
 
 import torch
 
-from cann_ops_tilelang.config import get_num_vector_cores, require_ascend
+from cann_ops_tilelang.common.compile_utils import resolve_vector_cores
+from cann_ops_tilelang.config import require_ascend
 
 from .expand_kernel import expand_to_mhc_backward_kernel, expand_to_mhc_forward_kernel
 
@@ -53,10 +77,7 @@ def _forward_hidden_block(num_tokens: int, hidden_size: int) -> int:
     return 1024
 
 
-def expand_to_mhc_forward(x: torch.Tensor, output: torch.Tensor) -> None:
-    """Copy every BF16 activation row into each MHC stream on Ascend."""
-
-    require_ascend()
+def _validate_expand_to_mhc_forward_metadata(x: torch.Tensor, output: torch.Tensor) -> tuple:
     if not isinstance(x, torch.Tensor):
         raise TypeError('x must be a torch.Tensor.')
     if x.ndim != 2:
@@ -71,32 +92,44 @@ def expand_to_mhc_forward(x: torch.Tensor, output: torch.Tensor) -> None:
     mhc_mult = output.shape[1]
     if mhc_mult <= 0:
         raise ValueError(f'mhc_mult must be positive, got {mhc_mult}.')
-
     _check_npu_bfloat16_tensor('x', x)
-    _check_npu_bfloat16_tensor(
-        'output',
-        output,
-        shape=(num_tokens, mhc_mult, hidden_size),
-        device=x.device,
-    )
+    _check_npu_bfloat16_tensor('output', output, shape=(num_tokens, mhc_mult, hidden_size), device=x.device)
+    return (hidden_size, num_tokens)
+
+
+def _expand_to_mhc_forward_impl(x: torch.Tensor, output: torch.Tensor, *, vector_cores: int) -> None:
+    """Copy every BF16 activation row into each MHC stream on Ascend."""
+    hidden_size, num_tokens = _validate_expand_to_mhc_forward_metadata(x, output)
+    require_ascend()
     if _shares_storage(output, x):
         raise ValueError('output and x must not share storage.')
     if num_tokens == 0:
         return
-
     expand_to_mhc_forward_kernel(
         x,
         output,
         hidden_block=_forward_hidden_block(num_tokens, hidden_size),
         num_stages=_FORWARD_NUM_STAGES,
-        num_vec_cores=get_num_vector_cores(),
+        num_vec_cores=vector_cores,
     )
 
 
-def expand_to_mhc_backward(output_grad: torch.Tensor, x_grad: torch.Tensor) -> None:
-    """Sum BF16 MHC stream gradients into a caller-owned activation gradient."""
+@torch.library.custom_op(
+    'cann_ops_tilelang::expand_to_mhc_forward', mutates_args=('output',), schema='(Tensor x, Tensor(a!) output) -> ()'
+)
+def expand_to_mhc_forward(x: torch.Tensor, output: torch.Tensor) -> None:
+    """Use runtime core configuration; configuration APIs invalidate compiled graphs."""
+    _validate_expand_to_mhc_forward_metadata(x, output)
+    cores = 1 if x.numel() == 0 else resolve_vector_cores(x)
+    _expand_to_mhc_forward_impl(x, output, vector_cores=cores)
 
-    require_ascend()
+
+@expand_to_mhc_forward.register_fake
+def _expand_to_mhc_forward_fake(x: torch.Tensor, output: torch.Tensor) -> None:
+    _validate_expand_to_mhc_forward_metadata(x, output)
+
+
+def _validate_expand_to_mhc_backward_metadata(output_grad: torch.Tensor, x_grad: torch.Tensor):
     if not isinstance(output_grad, torch.Tensor):
         raise TypeError('output_grad must be a torch.Tensor.')
     if output_grad.ndim != 3:
@@ -106,23 +139,40 @@ def expand_to_mhc_backward(output_grad: torch.Tensor, x_grad: torch.Tensor) -> N
         raise ValueError(f'mhc_mult must be positive, got {mhc_mult}.')
     if hidden_size <= 0 or hidden_size % _BACKWARD_HIDDEN_ALIGNMENT:
         raise ValueError(f'hidden_size must be a positive multiple of {_BACKWARD_HIDDEN_ALIGNMENT}, got {hidden_size}.')
-
     _check_npu_bfloat16_tensor('output_grad', output_grad)
-    _check_npu_bfloat16_tensor(
-        'x_grad',
-        x_grad,
-        shape=(num_tokens, hidden_size),
-        device=output_grad.device,
-    )
+    _check_npu_bfloat16_tensor('x_grad', x_grad, shape=(num_tokens, hidden_size), device=output_grad.device)
+    return num_tokens
+
+
+def _expand_to_mhc_backward_impl(output_grad: torch.Tensor, x_grad: torch.Tensor, *, vector_cores: int) -> None:
+    """Sum BF16 MHC stream gradients into a caller-owned activation gradient."""
+    num_tokens = _validate_expand_to_mhc_backward_metadata(output_grad, x_grad)
+    require_ascend()
     if _shares_storage(x_grad, output_grad):
         raise ValueError('x_grad and output_grad must not share storage.')
     if num_tokens == 0:
         return
-
     expand_to_mhc_backward_kernel(
         output_grad,
         x_grad,
         hidden_block=_BACKWARD_HIDDEN_BLOCK,
         num_stages=_BACKWARD_NUM_STAGES,
-        num_vec_cores=get_num_vector_cores(),
+        num_vec_cores=vector_cores,
     )
+
+
+@torch.library.custom_op(
+    'cann_ops_tilelang::expand_to_mhc_backward',
+    mutates_args=('x_grad',),
+    schema='(Tensor output_grad, Tensor(a!) x_grad) -> ()',
+)
+def expand_to_mhc_backward(output_grad: torch.Tensor, x_grad: torch.Tensor) -> None:
+    """Use runtime core configuration; configuration APIs invalidate compiled graphs."""
+    _validate_expand_to_mhc_backward_metadata(output_grad, x_grad)
+    cores = 1 if output_grad.numel() == 0 else resolve_vector_cores(output_grad)
+    _expand_to_mhc_backward_impl(output_grad, x_grad, vector_cores=cores)
+
+
+@expand_to_mhc_backward.register_fake
+def _expand_to_mhc_backward_fake(output_grad: torch.Tensor, x_grad: torch.Tensor) -> None:
+    _validate_expand_to_mhc_backward_metadata(output_grad, x_grad)

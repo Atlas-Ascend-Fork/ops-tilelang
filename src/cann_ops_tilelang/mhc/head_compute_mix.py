@@ -1,3 +1,26 @@
+# MIT License
+#
+# Copyright (c) 2026 DeepSeek
+# Copyright (c) 2026 ops-tilelang contributors
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
 """Public interfaces for the MHC head mix transform."""
 
 from __future__ import annotations
@@ -7,7 +30,8 @@ from numbers import Real
 
 import torch
 
-from cann_ops_tilelang.config import get_num_vector_cores, require_ascend
+from cann_ops_tilelang.common.compile_utils import resolve_vector_cores
+from cann_ops_tilelang.config import require_ascend
 
 from .head_compute_mix_kernel import (
     mhc_head_compute_mix_backward_kernel,
@@ -49,10 +73,10 @@ def _check_eps(value: float) -> float:
     return result
 
 
-def _check_num_vec_cores(value: int) -> int:
+def _check_num_vec_cores(value: int, *, vector_cores: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError('num_vec_cores must be an integer.')
-    detected = get_num_vector_cores()
+    detected = vector_cores
     if value <= 0 or value > detected:
         raise ValueError(f'num_vec_cores must be in [1, {detected}], got {value}.')
     return value
@@ -106,7 +130,30 @@ def _validate_inputs(
     return num_tokens, device
 
 
-def mhc_head_compute_mix_forward(
+def _check_num_vec_cores_metadata(value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError('num_vec_cores must be an integer.')
+    if value <= 0:
+        raise ValueError('num_vec_cores must be positive.')
+    return value
+
+
+def _validate_mhc_head_compute_mix_forward_metadata(
+    input_mix: torch.Tensor,
+    mhc_scale: torch.Tensor,
+    mhc_base: torch.Tensor,
+    output_mix: torch.Tensor,
+    mhc_pre_eps: float,
+    token_block_size: int = 0,
+) -> tuple:
+    eps = _check_eps(mhc_pre_eps)
+    num_tokens, device = _validate_inputs(input_mix, mhc_scale, mhc_base)
+    _check_npu_fp32_tensor('output_mix', output_mix, shape=(num_tokens, _MHC_MULT), device=device)
+    selected_token_block_size = _choose_token_block_size(token_block_size)
+    return (eps, num_tokens, selected_token_block_size)
+
+
+def _mhc_head_compute_mix_forward_impl(
     input_mix: torch.Tensor,
     mhc_scale: torch.Tensor,
     mhc_base: torch.Tensor,
@@ -115,35 +162,53 @@ def mhc_head_compute_mix_forward(
     token_block_size: int = 0,
 ) -> None:
     """Apply the FP32 affine sigmoid transform for four MHC streams."""
-
-    eps = _check_eps(mhc_pre_eps)
+    eps, num_tokens, selected_token_block_size = _validate_mhc_head_compute_mix_forward_metadata(
+        input_mix, mhc_scale, mhc_base, output_mix, mhc_pre_eps, token_block_size
+    )
     require_ascend()
-    num_tokens, device = _validate_inputs(input_mix, mhc_scale, mhc_base)
-    _check_npu_fp32_tensor(
-        'output_mix',
-        output_mix,
-        shape=(num_tokens, _MHC_MULT),
-        device=device,
-    )
     _check_output_aliases(
-        (('input_mix', input_mix), ('mhc_scale', mhc_scale), ('mhc_base', mhc_base)),
-        (('output_mix', output_mix),),
+        (('input_mix', input_mix), ('mhc_scale', mhc_scale), ('mhc_base', mhc_base)), (('output_mix', output_mix),)
     )
-    selected_token_block_size = _choose_token_block_size(token_block_size)
     if num_tokens == 0:
         return
-
     mhc_head_compute_mix_forward_kernel(
-        input_mix,
-        mhc_scale,
-        mhc_base,
-        output_mix,
-        eps,
-        token_block_size=selected_token_block_size,
+        input_mix, mhc_scale, mhc_base, output_mix, eps, token_block_size=selected_token_block_size
     )
 
 
-def mhc_head_compute_mix_backward(
+@torch.library.custom_op(
+    'cann_ops_tilelang::mhc_head_compute_mix_forward',
+    mutates_args=('output_mix',),
+    schema='(Tensor input_mix, Tensor mhc_scale, Tensor mhc_base, Tensor(a!) output_mix, '
+    'Any? mhc_pre_eps, Any? token_block_size=0) -> ()',
+)
+def mhc_head_compute_mix_forward(
+    input_mix: torch.Tensor,
+    mhc_scale: torch.Tensor,
+    mhc_base: torch.Tensor,
+    output_mix: torch.Tensor,
+    mhc_pre_eps: float,
+    token_block_size: int = 0,
+) -> None:
+    """Apply the affine sigmoid transform, writing output_mix and returning None."""
+    _mhc_head_compute_mix_forward_impl(input_mix, mhc_scale, mhc_base, output_mix, mhc_pre_eps, token_block_size)
+
+
+@mhc_head_compute_mix_forward.register_fake
+def _mhc_head_compute_mix_forward_fake(
+    input_mix: torch.Tensor,
+    mhc_scale: torch.Tensor,
+    mhc_base: torch.Tensor,
+    output_mix: torch.Tensor,
+    mhc_pre_eps: float,
+    token_block_size: int = 0,
+) -> None:
+    _validate_mhc_head_compute_mix_forward_metadata(
+        input_mix, mhc_scale, mhc_base, output_mix, mhc_pre_eps, token_block_size
+    )
+
+
+def _validate_mhc_head_compute_mix_backward_metadata(
     output_mix_grad: torch.Tensor,
     input_mix: torch.Tensor,
     mhc_scale: torch.Tensor,
@@ -153,11 +218,8 @@ def mhc_head_compute_mix_backward(
     mhc_base_grad_partial: torch.Tensor,
     num_vec_cores: int,
     token_block_size: int = 0,
-) -> None:
-    """Compute input and partial parameter gradients for the MHC head mix."""
-
-    require_ascend()
-    num_vec_cores = _check_num_vec_cores(num_vec_cores)
+) -> tuple:
+    num_vec_cores = _check_num_vec_cores_metadata(num_vec_cores)
     num_tokens, device = _validate_inputs(input_mix, mhc_scale, mhc_base)
     tensor_specs = (
         ('output_mix_grad', output_mix_grad, (num_tokens, _MHC_MULT)),
@@ -167,7 +229,6 @@ def mhc_head_compute_mix_backward(
     )
     for name, tensor, shape in tensor_specs:
         _check_npu_fp32_tensor(name, tensor, shape=shape, device=device)
-
     inputs = (
         ('output_mix_grad', output_mix_grad),
         ('input_mix', input_mix),
@@ -179,14 +240,48 @@ def mhc_head_compute_mix_backward(
         ('mhc_scale_grad_partial', mhc_scale_grad_partial),
         ('mhc_base_grad_partial', mhc_base_grad_partial),
     )
-    _check_output_aliases(inputs, outputs)
     selected_token_block_size = _choose_token_block_size(token_block_size)
-    if num_tokens == 0:
-        mhc_scale_grad_partial.zero_()
-        mhc_base_grad_partial.zero_()
-        return
+    return (inputs, num_tokens, outputs, selected_token_block_size, num_vec_cores)
 
-    mhc_head_compute_mix_backward_kernel(
+
+def _mhc_head_compute_mix_backward_impl(arguments, *, vector_cores: int) -> None:
+    """Validate and launch backward using the caller's gradient buffers."""
+    inputs, num_tokens, outputs, tile, requested = _validate_mhc_head_compute_mix_backward_metadata(*arguments)
+    require_ascend()
+    _check_output_aliases(inputs, outputs)
+    requested = _check_num_vec_cores(requested, vector_cores=vector_cores)
+    if num_tokens == 0:
+        for _, partial in outputs[1:]:
+            partial.zero_()
+        return
+    mhc_head_compute_mix_backward_kernel(*arguments[:7], token_block_size=tile, num_vec_cores=requested)
+
+
+@torch.library.custom_op(
+    'cann_ops_tilelang::mhc_head_compute_mix_backward',
+    mutates_args=('input_mix_grad', 'mhc_scale_grad_partial', 'mhc_base_grad_partial'),
+    schema='(Tensor output_mix_grad, Tensor input_mix, Tensor mhc_scale, Tensor mhc_base, '
+    'Tensor(a!) input_mix_grad, Tensor(b!) mhc_scale_grad_partial, Tensor(c!) mhc_base_grad_partial, '
+    'Any? num_vec_cores, Any? token_block_size=0) -> ()',
+)
+def mhc_head_compute_mix_backward(
+    output_mix_grad: torch.Tensor,
+    input_mix: torch.Tensor,
+    mhc_scale: torch.Tensor,
+    mhc_base: torch.Tensor,
+    input_mix_grad: torch.Tensor,
+    mhc_scale_grad_partial: torch.Tensor,
+    mhc_base_grad_partial: torch.Tensor,
+    num_vec_cores: int,
+    token_block_size: int = 0,
+) -> None:
+    """Write input/partial gradients; num_vec_cores determines caller buffer shapes.
+
+    Runtime configuration supplies the launch limit; configuration APIs
+    invalidate compiled graphs when that configuration changes. Fake checks
+    the supplied buffer shapes without querying runtime configuration.
+    """
+    arguments = (
         output_mix_grad,
         input_mix,
         mhc_scale,
@@ -194,6 +289,16 @@ def mhc_head_compute_mix_backward(
         input_mix_grad,
         mhc_scale_grad_partial,
         mhc_base_grad_partial,
-        token_block_size=selected_token_block_size,
-        num_vec_cores=num_vec_cores,
+        num_vec_cores,
+        token_block_size,
     )
+    _validate_mhc_head_compute_mix_backward_metadata(*arguments)
+    vector_cores = resolve_vector_cores(output_mix_grad)
+    _mhc_head_compute_mix_backward_impl(arguments, vector_cores=vector_cores)
+
+
+@mhc_head_compute_mix_backward.register_fake
+def _mhc_head_compute_mix_backward_fake(*args, **kwargs) -> None:
+    if len(args) < 9:
+        kwargs.setdefault('token_block_size', 0)
+    _validate_mhc_head_compute_mix_backward_metadata(*args, **kwargs)
