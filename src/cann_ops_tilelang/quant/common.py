@@ -303,20 +303,20 @@ def unpack_from_e2m1fn_x2(x: torch.Tensor, out_dtype: torch.dtype = torch.float3
     if x.ndim == 0:
         raise ValueError('x must have at least 1 dimension so the last dim can be doubled')
 
+    # Device-side fills avoid temporary host scalar copies during graph capture.
+    high_shift = torch.full((), 4, dtype=x.dtype, device=x.device)
+    sign_shift = torch.full((), 3, dtype=torch.int16, device=x.device)
+    exponent_shift = torch.full((), 1, dtype=torch.int16, device=x.device)
     lo = (x & 0x0F).to(torch.int16)
-    hi = ((x >> 4) & 0x0F).to(torch.int16)
+    hi = ((x >> high_shift) & 0x0F).to(torch.int16)
 
     def decode_fp4_e2m1(n: torch.Tensor) -> torch.Tensor:
         # n in [0..15], layout: s(1) | e(2) | m(1)
-        s = (n >> 3) & 0x1
-        e = (n >> 1) & 0x3
+        s = (n >> sign_shift) & 0x1
+        e = (n >> exponent_shift) & 0x3
         m = n & 0x1
 
-        sign = torch.where(
-            s == 1,
-            torch.tensor(-1.0, device=n.device),
-            torch.tensor(1.0, device=n.device),
-        )
+        sign = torch.where(s == 1, -1.0, 1.0)
 
         bias = 1
 
@@ -326,7 +326,7 @@ def unpack_from_e2m1fn_x2(x: torch.Tensor, out_dtype: torch.dtype = torch.float3
 
         # normal: e in {1,2,3} -> value = sign * 2^(e-bias) * (1 + m/2)
         norm = (1.0 + m.to(torch.float32) * 0.5) * torch.pow(
-            torch.tensor(2.0, device=n.device),
+            2.0,
             (e - bias).to(torch.float32),
         )
 

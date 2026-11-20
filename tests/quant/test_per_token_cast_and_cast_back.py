@@ -103,3 +103,72 @@ def test_per_token_cast_and_cast_back_benchmark(benchmark_timer, benchmark_recor
         time_us=t_us,
         bandwidth_gbs=num_bytes / t_us / 1e3,
     )
+
+
+@torch.inference_mode()
+def test_per_token_cast_and_cast_back_compile():
+    from tests.testing.quant import call_quant_graph, check_quant_graph_replay, compile_quant_graph
+
+    compiled = compile_quant_graph(cann_ops_tilelang.per_token_cast_and_cast_back)
+    backing = torch.randn((31, 512), dtype=torch.bfloat16, device=get_device())
+    records = []
+    for step in range(3):
+        if step == 1:
+            backing.neg_().add_(0.125)
+        elif step == 2:
+            backing = torch.randn_like(backing)
+        x = backing[:, :256]
+        before = backing.clone()
+        expected = cast_back(cast(x, 'e2m1', (1, 32), round_sf=True), 'bf16', (1, 32))
+        pointer, stride, offset = x.data_ptr(), x.stride(), x.storage_offset()
+        result, events = call_quant_graph(compiled, x, 'e2m1', 32, round_sf=True)
+        records.append(events)
+        assert result is None
+        assert_equal(x, expected, check_stride=False)
+        assert_equal(backing[:, 256:], before[:, 256:])
+        assert (x.data_ptr(), x.stride(), x.storage_offset()) == (pointer, stride, offset)
+    check_quant_graph_replay(records)
+
+    torch.library.opcheck(
+        torch.ops.cann_ops_tilelang.per_token_cast_and_cast_back.default,
+        (x, 'e2m1', 32, True),
+        test_utils=('test_schema', 'test_faketensor'),
+    )
+
+
+@torch.inference_mode()
+def test_per_token_cast_and_cast_back_compile_special_values():
+    from tests.testing.quant import call_quant_graph, check_quant_graph_replay, compile_quant_graph
+
+    compiled = compile_quant_graph(cann_ops_tilelang.per_token_cast_and_cast_back)
+    backing = torch.zeros((31, 512), dtype=torch.bfloat16, device=get_device())
+    records = []
+    for step in range(3):
+        if step == 1:
+            backing.fill_(0.5)
+        elif step == 2:
+            backing = torch.full_like(backing, -1.25)
+        x = backing[:, :256]
+        finite_mask = torch.ones_like(x, dtype=torch.bool)
+        if step:
+            x[:, 96:128].zero_()
+            row = 0 if step == 1 else x.shape[0] - 1
+            x[row, 0] = float('nan')
+            x[row, 32] = float('inf')
+            x[row, 64] = -float('inf')
+            finite_mask[row, :96] = False
+        before = backing.clone()
+        reference = cast_back(cast(x, 'e2m1', (1, 32), round_sf=True), 'bf16', (1, 32))
+        eager = x.clone()
+        cann_ops_tilelang.per_token_cast_and_cast_back(eager, 'e2m1', 32, round_sf=True)
+        pointer, stride, offset = x.data_ptr(), x.stride(), x.storage_offset()
+        result, events = call_quant_graph(compiled, x, 'e2m1', 32, round_sf=True)
+        records.append(events)
+        assert result is None
+        assert_equal(x, eager, check_stride=False)
+        # Non-finite quantization has an existing cast_ref discrepancy. Keep the
+        # independent check bit-exact on zero input and all finite-only groups.
+        assert_equal(x[finite_mask], reference[finite_mask])
+        assert_equal(backing[:, 256:], before[:, 256:])
+        assert (x.data_ptr(), x.stride(), x.storage_offset()) == (pointer, stride, offset)
+    check_quant_graph_replay(records)

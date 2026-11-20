@@ -4,7 +4,6 @@ import tilelang
 from tilelang.ascend import language as T
 from tilelang.ascend.language import simd as S
 
-from cann_ops_tilelang.config import get_num_vector_cores
 from cann_ops_tilelang.quant.common import (
     CastInputConfig,
     CastOutputConfig,
@@ -19,6 +18,7 @@ def get_per_channel_cast_kernel_asc(
     hidden: int,
     in_config: CastInputConfig,
     out_config: CastOutputConfig,
+    num_cores: int,
 ):
     # bf16 hidden >= 2048 时用 nbg=1（迭代数翻倍，MTE2 请求更频繁，bf16 2048 改善 ~4%）；
     # 小 hidden(128) 保持 nbg=2 以聚合 pack_row，避免退化。
@@ -90,8 +90,6 @@ def get_per_channel_cast_kernel_asc(
         num_packed_rows = groups_per_tile * num_blocks_per_group // pack_factor
     else:
         num_blocks_per_group = 1
-
-    num_cores = get_num_vector_cores()
 
     num_tokens = T.dynamic('num_tokens')
     sf_stride = T.dynamic('sf_stride')

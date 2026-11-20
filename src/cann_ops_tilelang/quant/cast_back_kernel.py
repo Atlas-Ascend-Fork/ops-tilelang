@@ -4,7 +4,6 @@ import tilelang
 from tilelang.ascend import language as T
 from tilelang.ascend.language import simd as S
 
-from cann_ops_tilelang.config import get_num_vector_cores
 from cann_ops_tilelang.utils import align_up as align
 from cann_ops_tilelang.utils import ceil_div
 
@@ -16,9 +15,9 @@ def get_cast_back_kernel_ascend(
     hidden: int,
     in_config: CastInputConfig,
     out_dtype: T.dtype = T.bfloat16,
+    *,
+    n_cores: int,
 ):
-    n_cores = get_num_vector_cores()
-
     num_per_tokens, num_per_channels = in_config.sf_block
     pack_factor = get_packed_ue8m0_pack_factor() if in_config.use_packed_ue8m0 else 1
     assert (num_per_tokens, num_per_channels) in ((1, 32), (1, 128), (32, 1), (32, 32), (128, 1), (128, 128))

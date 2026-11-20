@@ -1,3 +1,5 @@
+import logging
+
 import torch
 
 from cann_ops_tilelang.quant.common import get_packed_ue8m0_pack_factor, unpack_from_e2m1fn_x2
@@ -65,3 +67,33 @@ def clear_unused_sf_col_pack(sf: torch.Tensor, num_tokens: int, num_per_tokens: 
     sf_unpacked = sf_uint8.view(aligned_num_token_blocks // pack_factor, -1, pack_factor)
     sf_unpacked[num_token_blocks // pack_factor :, :, num_token_blocks % pack_factor :] = 0
     return sf_uint8.view(aligned_num_token_blocks // pack_factor, -1)
+
+
+def compile_quant_graph(op):
+    """Build an independent fixed-shape graph for a small correctness test."""
+    torch.compiler.reset()
+    return torch.compile(op, backend='npugraph_ex', fullgraph=True, dynamic=False)
+
+
+def call_quant_graph(compiled, *args, **kwargs):
+    """Return one call's output and evidence of capture/replay, not just Dynamo tracing."""
+    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]) as profile:
+        result = compiled(*args, **kwargs)
+        torch.npu.synchronize()
+    events = {event.key: event.count for event in profile.key_averages()}
+    names = ('acl_graph_capture', 'acl_graph_replay', 'fx_run_eagerly')
+    counts = {name: events.get(name, 0) for name in names}
+    logging.getLogger(__name__).info('NPU graph events: %s', counts)
+    return result, counts
+
+
+def check_quant_graph_replay(records):
+    """Same-storage input updates must replay; mutated state may recapture after replacement."""
+    if not any(record['acl_graph_capture'] for record in records):
+        raise AssertionError(f'No NPU graph capture recorded: {records}')
+    if records[1]['acl_graph_replay'] <= 0:
+        raise AssertionError(f'The second call did not replay the NPU graph: {records}')
+    if records[1]['acl_graph_capture'] != 0:
+        raise AssertionError(f'The second call recaptured the NPU graph: {records}')
+    if not all(record['fx_run_eagerly'] == 0 for record in records):
+        raise AssertionError(f'Unexpected eager fallback: {records}')

@@ -2,7 +2,6 @@ import tilelang
 from tilelang.ascend import language as T
 from tilelang.ascend.language import simd as S
 
-from cann_ops_tilelang.config import get_num_vector_cores
 from cann_ops_tilelang.utils import align_up as align
 
 from .common import CastOutputConfig
@@ -102,6 +101,7 @@ def get_per_token_cast_and_cast_back_kernel_asc(
     token_stride: int,
     dtype: T.dtype,
     out_config: CastOutputConfig,
+    n_cores: int,
 ):
     num_per_channels = out_config.sf_block[1]
     is_bf16_in = dtype == T.bfloat16
@@ -120,7 +120,6 @@ def get_per_token_cast_and_cast_back_kernel_asc(
     round_carry = 0x003FFFFF if is_fp4_out else 0x001FFFFF
     quant_max_exp = 0x01000000 if is_fp4_out else 0x04000000
 
-    n_cores = get_num_vector_cores()
     num_stages = 4 if hidden >= 2560 else 3
 
     block_m, block_k, tile_width = _get_block_shape(hidden, dtype, num_stages, num_per_channels, n_cores)

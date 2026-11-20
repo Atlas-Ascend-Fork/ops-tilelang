@@ -20,6 +20,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+import math
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -125,3 +126,21 @@ def test_clear_runtime_caches_invalidates_vector_core_environment(core_config_ru
         config.clear_runtime_caches()
         assert config.get_num_vector_cores() == expected
         assert core_config_runtime.call_count == reset_count
+
+
+def test_quant_clamp_invalidates_only_changed_configuration(monkeypatch):
+    reset_compiler = Mock()
+    monkeypatch.setattr(torch.compiler, 'reset', reset_compiler)
+    previous = config.get_amax_clamp_for_quant('e4m3')
+    config.set_amax_clamp_for_quant('e4m3', previous)
+    reset_compiler.assert_not_called()
+    config.set_amax_clamp_for_quant('e4m3', previous * 2)
+    reset_compiler.assert_called_once_with()
+    config.set_amax_clamp_for_quant('e4m3', previous * 2)
+    reset_compiler.assert_called_once_with()
+    with pytest.raises(ValueError):
+        config.set_amax_clamp_for_quant('e4m3', float('nan'))
+    assert math.isclose(config.get_amax_clamp_for_quant('e4m3'), previous * 2, rel_tol=0.0, abs_tol=0.0)
+    reset_compiler.assert_called_once_with()
+    config.reset_runtime_config()
+    assert reset_compiler.call_count == 2

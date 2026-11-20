@@ -25,6 +25,7 @@ _token_alignment = _DEFAULT_TOKEN_ALIGNMENT
 _quant_clamp_min_values = _DEFAULT_QUANT_CLAMP_MIN_VALUES.copy()
 # Read only configuration metadata here; importing this module stays device-free.
 _compiler_core_config = (_num_ai_cores_override, os.getenv(_NUM_VECTOR_CORES_ENV))
+_compiler_quant_clamp_config = _quant_clamp_min_values.copy()
 
 
 def _reset_compiler_on_core_config_change() -> None:
@@ -34,6 +35,13 @@ def _reset_compiler_on_core_config_change() -> None:
         # Opaque custom ops cannot guard their internal tuning configuration.
         torch.compiler.reset()
         _compiler_core_config = current
+
+
+def _reset_compiler_on_quant_clamp_config_change() -> None:
+    global _compiler_quant_clamp_config
+    if _quant_clamp_min_values != _compiler_quant_clamp_config:
+        torch.compiler.reset()
+        _compiler_quant_clamp_config = _quant_clamp_min_values.copy()
 
 
 @lru_cache(maxsize=1)
@@ -163,16 +171,18 @@ def set_amax_clamp_for_quant(fmt: str, clamp_min_value: float) -> None:
     if not math.isfinite(value) or value <= 0:
         raise ValueError(f'clamp_min_value must be finite and positive, got {clamp_min_value}.')
     _quant_clamp_min_values[fmt] = value
+    _reset_compiler_on_quant_clamp_config_change()
 
 
 def reset_runtime_config() -> None:
-    """Reset runtime tuning settings and invalidate graphs if core settings change."""
+    """Reset runtime tuning settings and invalidate graphs if core or clamp settings change."""
 
     global _num_ai_cores_override, _token_alignment, _quant_clamp_min_values
     _num_ai_cores_override = None
     _token_alignment = _DEFAULT_TOKEN_ALIGNMENT
     _quant_clamp_min_values = _DEFAULT_QUANT_CLAMP_MIN_VALUES.copy()
     clear_runtime_caches()
+    _reset_compiler_on_quant_clamp_config_change()
 
 
 def clear_runtime_caches() -> None:
