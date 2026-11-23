@@ -1,3 +1,25 @@
+# MIT License
+#
+# Copyright (c) 2026 ops-tilelang contributors
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
 import tilelang
 from tilelang.ascend import language as T
 
@@ -62,6 +84,9 @@ def get_gather_engram_tokens_zos_kernel(max_seqlen_q: int, max_ngram_size: int):
                     token_idx = element_idx // max_ngram_size
                     ngram_idx = element_idx % max_ngram_size
                     seq_idx = batch_base + local_seq
+                    token_value = T.alloc_var(T.int32, init=0)
+                    raw_token_id = T.alloc_var(T.int32, init=0)
+                    num_rejected = T.alloc_var(T.int32, init=nextn)
                     if local_seq < n_remaining:
                         seq_len = seqlens_q_ub[local_seq]
                         if token_idx < seq_len:
@@ -71,25 +96,20 @@ def get_gather_engram_tokens_zos_kernel(max_seqlen_q: int, max_ngram_size: int):
                             if token_idx >= ngram_idx:
                                 curr_idx = token_idx - ngram_idx
                                 if prev_idx >= 0:
-                                    if curr_idx == 0:
-                                        out_ngram_token_ids[q_offset, ngram_idx] = lookup_table[
-                                            prev_sampled_token_ids[prev_idx]
-                                        ]
+                                    # Keep the token load and lookup separate so
+                                    # PTODSL bounds guards do not nest excessively.
+                                    if curr_idx == 0:  # noqa: SIM108
+                                        raw_token_id = prev_sampled_token_ids[prev_idx]
                                     else:
-                                        out_ngram_token_ids[q_offset, ngram_idx] = lookup_table[
-                                            prev_predict_token_ids[prev_idx, curr_idx - 1]
-                                        ]
+                                        raw_token_id = prev_predict_token_ids[prev_idx, curr_idx - 1]
+                                    token_value = lookup_table[raw_token_id]
                                 else:
-                                    out_ngram_token_ids[q_offset, ngram_idx] = curr_fresh[seq_idx, curr_idx]
+                                    token_value = curr_fresh[seq_idx, curr_idx]
                             else:
-                                num_rejected = T.if_then_else(
-                                    prev_idx >= 0,
-                                    nextn - prev_num_accepted_tokens[prev_idx],
-                                    nextn,
-                                )
+                                if prev_idx >= 0:
+                                    num_rejected = nextn - prev_num_accepted_tokens[prev_idx]
                                 window_base = window_size - num_rejected
-                                out_ngram_token_ids[q_offset, ngram_idx] = win_compressed[
-                                    seq_idx, window_base + token_idx - ngram_idx
-                                ]
+                                token_value = win_compressed[seq_idx, window_base + token_idx - ngram_idx]
+                            out_ngram_token_ids[q_offset, ngram_idx] = token_value
 
     return gather_engram_tokens_zos_kernel

@@ -22,12 +22,14 @@
 
 import importlib
 import logging
+import os
 from collections.abc import Callable
 from typing import Any
 
 import pytest
 import torch
 
+from cann_ops_tilelang import config
 from cann_ops_tilelang.config import get_device
 from cann_ops_tilelang.tensor.compute_seqlens_k_zos import (
     _compute_seqlens_k_zos_fake,
@@ -192,6 +194,83 @@ def test_compute_seqlens_k_zos_graph_replay(caplog: pytest.LogCaptureFixture, mo
 
     check_call('first call', capture=True)
     check_call('replay', capture=False)
+
+
+@torch.inference_mode()
+def test_compute_seqlens_k_zos_compile_core_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    env_name = 'OPS_TILELANG_NUM_VECTOR_CORES'
+    original_env = os.getenv(env_name)
+    monkeypatch.delenv(env_name, raising=False)
+    config.reset_runtime_config()
+    config.clear_runtime_caches()
+    torch.compiler.reset()
+
+    inputs = _make_compile_inputs(512, 3, True)
+    expected = inputs[0].clone()
+    read_only_before = tuple(tensor.clone() for tensor in inputs[1:])
+    output_pointer = inputs[0].data_ptr()
+    module = importlib.import_module('cann_ops_tilelang.tensor.compute_seqlens_k_zos')
+    factory_calls: list[tuple[int, int]] = []
+
+    def record_kernel(nextn: int, num_cores: int):
+        factory_calls.append((nextn, num_cores))
+        return get_compute_seqlens_k_zos_kernel(nextn, num_cores)
+
+    monkeypatch.setattr(module, 'get_compute_seqlens_k_zos_kernel', record_kernel)
+    compiled = torch.compile(compute_seqlens_k_zos, backend='npugraph_ex', fullgraph=True, dynamic=False)
+
+    def check_call(label: str, expected_cores: int, *, capture: bool) -> None:
+        assert min(4, config.get_num_vector_cores()) == expected_cores, label
+        factory_calls.clear()
+        compute_seqlens_k_zos_ref(expected, *inputs[1:], nextn=3)
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]) as profile:
+            assert compiled(*inputs, nextn=3) is None
+            torch.npu.synchronize()
+        counts = {event.key: event.count for event in profile.key_averages()}
+        _LOGGER.info('%s: cores=%s, events=%s', label, factory_calls, counts)
+        assert not counts.get('fx_run_eagerly', 0), label
+        if capture:
+            assert counts.get('acl_graph_capture', 0), label
+            assert factory_calls and set(factory_calls) == {(3, expected_cores)}, label
+        else:
+            assert counts.get('acl_graph_replay', 0), label
+            assert not counts.get('acl_graph_capture', 0), label
+            assert not factory_calls, label
+        assert inputs[0].data_ptr() == output_pointer, label
+        assert torch.equal(inputs[0], expected), label
+        for tensor, before in zip(inputs[1:], read_only_before, strict=True):
+            assert torch.equal(tensor, before), label
+
+    try:
+        default_cores = min(4, config.get_num_vector_cores())
+        check_call('default', default_cores, capture=True)
+        check_call('default replay', default_cores, capture=False)
+        config.set_num_ai_cores(1)
+        check_call('AI core override', 2, capture=True)
+        config.set_num_ai_cores(1)
+        check_call('same AI core override', 2, capture=False)
+        config.reset_runtime_config()
+        check_call('AI core override removed', default_cores, capture=True)
+
+        with monkeypatch.context() as env:
+            for label, cap, capture in (
+                ('environment override added', '1', True),
+                ('environment override changed', '2', True),
+                ('same environment override', '2', False),
+            ):
+                env.setenv(env_name, cap)
+                config.clear_runtime_caches()
+                check_call(label, int(cap), capture=capture)
+        config.clear_runtime_caches()
+        check_call('environment override removed', default_cores, capture=True)
+    finally:
+        if original_env is None:
+            monkeypatch.delenv(env_name, raising=False)
+        else:
+            monkeypatch.setenv(env_name, original_env)
+        config.reset_runtime_config()
+        config.clear_runtime_caches()
+        torch.compiler.reset()
 
 
 def test_compute_seqlens_k_zos_registration() -> None:

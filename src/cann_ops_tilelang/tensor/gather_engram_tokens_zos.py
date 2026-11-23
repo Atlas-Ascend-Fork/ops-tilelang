@@ -1,3 +1,25 @@
+# MIT License
+#
+# Copyright (c) 2026 ops-tilelang contributors
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+
 """Public interface for gathering ZOS Engram token n-grams."""
 
 import torch
@@ -7,36 +29,7 @@ from cann_ops_tilelang.config import require_ascend, should_print_kernel_source
 from .gather_engram_tokens_zos_kernel import get_gather_engram_tokens_zos_kernel
 
 
-def gather_engram_tokens_zos(
-    win_compressed: torch.Tensor,
-    curr_fresh: torch.Tensor,
-    prev_sampled_token_ids: torch.Tensor,
-    prev_predict_token_ids: torch.Tensor,
-    prev_num_accepted_tokens: torch.Tensor,
-    remap: torch.Tensor,
-    lookup_table: torch.Tensor,
-    seqlens_q: torch.Tensor,
-    cu_seqlens_q: torch.Tensor,
-    out_ngram_token_ids: torch.Tensor,
-    *,
-    max_seqlen_q: int,
-    max_ngram_size: int,
-) -> None:
-    """Gather compressed token n-grams into ``out_ngram_token_ids`` on Ascend."""
-    tensors = (
-        win_compressed,
-        curr_fresh,
-        prev_sampled_token_ids,
-        prev_predict_token_ids,
-        prev_num_accepted_tokens,
-        remap,
-        lookup_table,
-        seqlens_q,
-        cu_seqlens_q,
-        out_ngram_token_ids,
-    )
-    if not all(isinstance(tensor, torch.Tensor) for tensor in tensors):
-        raise TypeError('all inputs and outputs must be torch.Tensor instances.')
+def _validate_parameters(max_seqlen_q: int, max_ngram_size: int) -> None:
     if not isinstance(max_seqlen_q, int) or isinstance(max_seqlen_q, bool):
         raise TypeError('max_seqlen_q must be an integer.')
     if not isinstance(max_ngram_size, int) or isinstance(max_ngram_size, bool):
@@ -46,7 +39,15 @@ def gather_engram_tokens_zos(
     if max_seqlen_q * max_ngram_size > 256:
         raise ValueError('max_seqlen_q * max_ngram_size must not exceed 256.')
 
-    require_ascend()
+
+def _validate_inputs(tensors: tuple[torch.Tensor, ...], *, max_seqlen_q: int, max_ngram_size: int) -> None:
+    win_compressed, curr_fresh = tensors[:2]
+    prev_sampled_token_ids, prev_predict_token_ids, prev_num_accepted_tokens = tensors[2:5]
+    remap = tensors[5]
+    seqlens_q, cu_seqlens_q, out_ngram_token_ids = tensors[-3:]
+    if not all(isinstance(tensor, torch.Tensor) for tensor in tensors):
+        raise TypeError('all inputs and outputs must be torch.Tensor instances.')
+    _validate_parameters(max_seqlen_q, max_ngram_size)
     if any(tensor.device.type != 'npu' for tensor in tensors):
         raise ValueError('all inputs and outputs must be NPU tensors.')
     if any(tensor.device != win_compressed.device for tensor in tensors):
@@ -77,10 +78,103 @@ def gather_engram_tokens_zos(
     if out_ngram_token_ids.shape[1] != max_ngram_size:
         raise ValueError(f'out_ngram_token_ids must have shape (total_q, {max_ngram_size}).')
 
+
+def _gather_engram_tokens_zos_impl(*tensors: torch.Tensor, max_seqlen_q: int, max_ngram_size: int) -> None:
+    _validate_inputs(tensors, max_seqlen_q=max_seqlen_q, max_ngram_size=max_ngram_size)
+    require_ascend()
+    if tensors[0].shape[0] == 0 or tensors[-1].numel() == 0:
+        return
     kernel = get_gather_engram_tokens_zos_kernel(max_seqlen_q, max_ngram_size)
     if should_print_kernel_source():
         print(kernel.get_kernel_source())
     kernel(*tensors)
+
+
+@torch.library.custom_op(
+    'cann_ops_tilelang::gather_engram_tokens_zos',
+    mutates_args=('out_ngram_token_ids',),
+    schema=(
+        '(Tensor win_compressed, Tensor curr_fresh, Tensor prev_sampled_token_ids, '
+        'Tensor prev_predict_token_ids, Tensor prev_num_accepted_tokens, Tensor remap, Tensor lookup_table, '
+        'Tensor seqlens_q, Tensor cu_seqlens_q, Tensor(a9!) out_ngram_token_ids, '
+        '*, SymInt max_seqlen_q, SymInt max_ngram_size) -> ()'
+    ),
+)
+def gather_engram_tokens_zos(
+    win_compressed: torch.Tensor,
+    curr_fresh: torch.Tensor,
+    prev_sampled_token_ids: torch.Tensor,
+    prev_predict_token_ids: torch.Tensor,
+    prev_num_accepted_tokens: torch.Tensor,
+    remap: torch.Tensor,
+    lookup_table: torch.Tensor,
+    seqlens_q: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    out_ngram_token_ids: torch.Tensor,
+    *,
+    max_seqlen_q: int,
+    max_ngram_size: int,
+) -> None:
+    """Gather ZOS token n-grams into the required output buffer and return None.
+
+    Only ``out_ngram_token_ids`` is written. Inputs and output must be contiguous
+    int32 tensors on the same NPU. Token IDs, remap indices and cumulative
+    sequence lengths must describe valid accesses; validation does not read
+    device data. Rows outside the described queries retain their previous value.
+
+    Supports fixed-shape ``npugraph_ex`` inference with ``fullgraph=True`` and
+    ``dynamic=False``. Fake execution validates metadata. TileLang JIT and
+    launch run in the real implementation. No autograd formula is registered.
+    """
+    return _gather_engram_tokens_zos_impl(
+        win_compressed,
+        curr_fresh,
+        prev_sampled_token_ids,
+        prev_predict_token_ids,
+        prev_num_accepted_tokens,
+        remap,
+        lookup_table,
+        seqlens_q,
+        cu_seqlens_q,
+        out_ngram_token_ids,
+        max_seqlen_q=max_seqlen_q,
+        max_ngram_size=max_ngram_size,
+    )
+
+
+@gather_engram_tokens_zos.register_fake
+def _gather_engram_tokens_zos_fake(
+    win_compressed: torch.Tensor,
+    curr_fresh: torch.Tensor,
+    prev_sampled_token_ids: torch.Tensor,
+    prev_predict_token_ids: torch.Tensor,
+    prev_num_accepted_tokens: torch.Tensor,
+    remap: torch.Tensor,
+    lookup_table: torch.Tensor,
+    seqlens_q: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    out_ngram_token_ids: torch.Tensor,
+    *,
+    max_seqlen_q: int,
+    max_ngram_size: int,
+) -> None:
+    _validate_inputs(
+        (
+            win_compressed,
+            curr_fresh,
+            prev_sampled_token_ids,
+            prev_predict_token_ids,
+            prev_num_accepted_tokens,
+            remap,
+            lookup_table,
+            seqlens_q,
+            cu_seqlens_q,
+            out_ngram_token_ids,
+        ),
+        max_seqlen_q=max_seqlen_q,
+        max_ngram_size=max_ngram_size,
+    )
+    return None
 
 
 def gather_engram_tokens_zos_ref(
