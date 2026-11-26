@@ -3,11 +3,25 @@ from typing import Any
 
 import pytest
 import torch
+import torch_npu  # noqa: F401
 
 from cann_ops_tilelang.attention.get_kv_index import get_fused_dflash_get_input
+from cann_ops_tilelang.attention.kv_index_cat import kv_index_cat
 from cann_ops_tilelang.config import get_device
+from tests.attention.compile_utils import (
+    assert_capture_and_replay,
+    assert_core_config_recompiles,
+    assert_tensor_outputs,
+    profiled_call,
+    record_jit_core_counts,
+)
+from tests.attention.test_kv_index_cat import kv_index_cat_ref
 
 pytestmark = pytest.mark.npu
+
+
+def _npu_int(values) -> torch.Tensor:
+    return torch.tensor(values, dtype=torch.int32, device=get_device())
 
 
 def get_fused_dflash_get_input_ref(
@@ -147,3 +161,104 @@ def test_fused_dflash_get_input_benchmark(
         time_us=t_us,
         extras={'bandwidth_gbs': data_bytes / 1000000000.0 / (t_us / 1000000.0)},
     )
+
+
+@pytest.mark.parametrize('masks,input_dtype', [(True, torch.int64), (False, torch.int32)])
+def test_fused_dflash_get_input_compile(masks: bool, input_dtype: torch.dtype) -> None:
+    slots = _npu_int([10, 11, 12, 20, 21, 22])
+    positions = _npu_int([4, 5, 6, 7, 8, 9])
+    ftp = _npu_int([0, 3])
+    accepted = _npu_int([4, 7])
+    compiled = torch.compile(get_fused_dflash_get_input, backend='npugraph_ex', fullgraph=True, dynamic=False)
+    events = []
+    for round_idx in range(3):
+        if round_idx == 1:
+            slots.copy_(_npu_int([30, 31, 32, 40, 41, 42]))
+            positions.copy_(_npu_int([10, 11, 12, 13, 14, 15]))
+            accepted.copy_(_npu_int([10, 13]))
+        elif round_idx == 2:
+            slots = _npu_int([50, 51, 52, 60, 61, 62])
+            positions = _npu_int([20, 21, 22, 23, 24, 25])
+            ftp = _npu_int([0, 3])
+            accepted = _npu_int([20, 23])
+        args = (slots, positions, ftp, accepted, 8, 3, 5, masks, masks, input_dtype)
+        expected = get_fused_dflash_get_input_ref(*args)
+        actual, event = profiled_call(compiled, *args)
+        assert_tensor_outputs(actual, expected)
+        assert actual[-1].stride() == (64, 1)
+        events.append(event)
+        del actual
+    assert_capture_and_replay(events)
+
+
+def test_fused_dflash_get_input_opcheck() -> None:
+    args = (
+        _npu_int([10, 11, 12]),
+        _npu_int([4, 5, 6]),
+        _npu_int([0]),
+        _npu_int([4]),
+        8,
+        2,
+        3,
+        True,
+        False,
+        torch.int32,
+    )
+    torch.library.opcheck(get_fused_dflash_get_input, args, test_utils=('test_schema', 'test_faketensor'))
+
+
+def test_fused_dflash_get_input_compile_core_config(monkeypatch) -> None:
+    args = (
+        _npu_int([10, 11, 12]),
+        _npu_int([4, 5, 6]),
+        _npu_int([0]),
+        _npu_int([4]),
+        8,
+        2,
+        3,
+        True,
+        False,
+        torch.int32,
+    )
+    expected = get_fused_dflash_get_input_ref(*args)
+    compiled = torch.compile(get_fused_dflash_get_input, backend='npugraph_ex', fullgraph=True, dynamic=False)
+    observations = (
+        record_jit_core_counts(
+            monkeypatch, 'cann_ops_tilelang.attention.get_kv_index', '_get_fused_dflash_get_input_tl_ascend'
+        ),
+    )
+
+    def check_output():
+        actual = compiled(*args)
+        assert_tensor_outputs(actual, expected)
+        del actual
+
+    assert_core_config_recompiles(check_output, monkeypatch, observations)
+
+
+def _draft_kv_pipeline(slots, positions, ftp, accepted, candidate_indices):
+    _, _, ids, _, _, kv_indices = get_fused_dflash_get_input(slots, positions, ftp, accepted, 8, 2, 3)
+    return kv_index_cat(kv_indices, candidate_indices, 10, 20), ids
+
+
+def test_dflash_then_kv_cat_in_one_graph() -> None:
+    slots = _npu_int([10, 11, 12])
+    positions = _npu_int([4, 5, 6])
+    ftp = _npu_int([0])
+    accepted = _npu_int([4])
+    candidate_indices = _npu_int([[2, -1, 5, 1], [3, 4, -1, 6]])
+    compiled = torch.compile(_draft_kv_pipeline, backend='npugraph_ex', fullgraph=True, dynamic=False)
+    events = []
+    for round_idx in range(2):
+        if round_idx:
+            slots.copy_(_npu_int([20, 21, 22]))
+            accepted.copy_(_npu_int([5]))
+            candidate_indices.copy_(_npu_int([[7, -1, 8, 9], [1, 2, 3, -1]]))
+        args = (slots, positions, ftp, accepted, candidate_indices)
+        _, _, ids, _, _, kv_indices = get_fused_dflash_get_input_ref(*args[:4], 8, 2, 3)
+        expected = kv_index_cat_ref(kv_indices, candidate_indices, 10, 20), ids
+        actual, event = profiled_call(compiled, *args)
+        assert_tensor_outputs(actual, expected)
+        events.append(event)
+        del actual
+    assert_capture_and_replay(events)

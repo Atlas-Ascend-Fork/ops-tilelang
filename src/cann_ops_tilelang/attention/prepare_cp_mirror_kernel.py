@@ -3,8 +3,6 @@
 import tilelang
 from tilelang.ascend import language as T
 
-from cann_ops_tilelang.config import get_num_vector_cores
-
 
 @tilelang.jit(
     pass_configs={
@@ -12,10 +10,9 @@ from cann_ops_tilelang.config import get_num_vector_cores
         tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True,
     },
 )
-def _precompute_tl_ascend(cp_size: int, cp_rank: int, compress_ratio: int) -> None:
+def _precompute_tl_ascend(cp_size: int, cp_rank: int, compress_ratio: int, num_cores: int) -> None:
     """Ascend AIV implementation of the per-batch precomputation."""
     batch_size = T.dynamic('batch_size')
-    num_cores = get_num_vector_cores()
 
     @T.prim_func
     def _precompute(
@@ -70,7 +67,7 @@ def _precompute_tl_ascend(cp_size: int, cp_rank: int, compress_ratio: int) -> No
         tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True,
     },
 )
-def _scatter_tl_ascend(cp_size: int, cp_rank: int, compress_ratio: int) -> None:
+def _scatter_tl_ascend(cp_size: int, cp_rank: int, compress_ratio: int, num_cores: int) -> None:
     """Ascend AIV scatter with bounded UB tiles and independent work domains."""
     batch_size = T.dynamic('batch_size')
     total_q = T.dynamic('total_q')
@@ -78,7 +75,6 @@ def _scatter_tl_ascend(cp_size: int, cp_rank: int, compress_ratio: int) -> None:
 
     block_size = 8192
     vec_len = 64
-    num_cores = get_num_vector_cores()
     ratio_is_pow2 = (compress_ratio & (compress_ratio - 1)) == 0
     ratio_shift = compress_ratio.bit_length() - 1
 

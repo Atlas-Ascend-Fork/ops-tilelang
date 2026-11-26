@@ -3,11 +3,23 @@ from typing import Any
 
 import pytest
 import torch
+import torch_npu  # noqa: F401
 
 from cann_ops_tilelang.attention.kv_index_cat import kv_index_cat
 from cann_ops_tilelang.config import get_device
+from tests.attention.compile_utils import (
+    assert_capture_and_replay,
+    assert_core_config_recompiles,
+    assert_tensor_outputs,
+    profiled_call,
+    record_jit_core_counts,
+)
 
 pytestmark = pytest.mark.npu
+
+
+def _npu_int(values) -> torch.Tensor:
+    return torch.tensor(values, dtype=torch.int32, device=get_device())
 
 
 def kv_index_cat_ref(
@@ -81,3 +93,47 @@ def test_kv_index_cat_benchmark(
         time_us=t_us,
         extras={'bandwidth_gbs': total_bytes / 1e9 / (t_us / 1e6)},
     )
+
+
+def test_kv_index_cat_compile() -> None:
+    left = _npu_int([[0, 1, 2, 3], [4, 5, 6, 7]])
+    right = _npu_int([[2, -1, 5], [1, 3, -1]])
+    compiled = torch.compile(kv_index_cat, backend='npugraph_ex', fullgraph=True, dynamic=False)
+    events = []
+    for round_idx in range(3):
+        if round_idx == 1:
+            left.copy_(_npu_int([[8, 9, 10, 11], [12, 13, 14, 15]]))
+            right.copy_(_npu_int([[-1, 2, 4], [5, -1, 1]]))
+        elif round_idx == 2:
+            left = _npu_int([[16, 17, 18, 19], [20, 21, 22, 23]])
+            right = _npu_int([[3, 4, -1], [-1, 6, 7]])
+        expected = kv_index_cat_ref(left, right, 10, 20)
+        actual, event = profiled_call(compiled, left, right, 10, 20)
+        assert_tensor_outputs(actual, expected)
+        assert actual.stride() == (8, 1)
+        events.append(event)
+        del actual
+    assert_capture_and_replay(events)
+
+
+def test_kv_index_cat_opcheck() -> None:
+    args = (_npu_int([[0, 1, 2, 3]]), _npu_int([[2, -1, 5]]), 10, 20)
+    torch.library.opcheck(kv_index_cat, args, test_utils=('test_schema', 'test_faketensor'))
+
+
+def test_kv_index_cat_compile_core_config(monkeypatch) -> None:
+    left = _npu_int([[0, 1, 2, 3]])
+    right = _npu_int([[2, -1, 5]])
+    args = (left, right, 10, 20)
+    expected = kv_index_cat_ref(*args)
+    compiled = torch.compile(kv_index_cat, backend='npugraph_ex', fullgraph=True, dynamic=False)
+    observations = (
+        record_jit_core_counts(monkeypatch, 'cann_ops_tilelang.attention.kv_index_cat', '_kv_index_cat_tl_ascend'),
+    )
+
+    def check_output():
+        actual = compiled(*args)
+        assert_tensor_outputs(actual, expected)
+        del actual
+
+    assert_core_config_recompiles(check_output, monkeypatch, observations)

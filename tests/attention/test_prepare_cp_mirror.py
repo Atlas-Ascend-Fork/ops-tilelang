@@ -1,10 +1,22 @@
 import pytest
 import torch
+import torch_npu  # noqa: F401
 
-from cann_ops_tilelang.attention.prepare_cp_mirror import prepare_for_mirror_cp_tilelang
+from cann_ops_tilelang.attention.prepare_cp_mirror import prepare_for_mirror_cp
 from cann_ops_tilelang.config import get_device
+from tests.attention.compile_utils import (
+    assert_capture_and_replay,
+    assert_core_config_recompiles,
+    assert_tensor_outputs,
+    profiled_call,
+    record_jit_core_counts,
+)
 
 pytestmark = pytest.mark.npu
+
+
+def _npu_int(values) -> torch.Tensor:
+    return torch.tensor(values, dtype=torch.int32, device=get_device())
 
 
 def prepare_for_mirror_cp_ref(
@@ -234,7 +246,7 @@ def _assert_prepare_for_mirror_cp_matches_ref(
     total_q = sum(q_lens)
     output_len = sum(2 * ((sq + cp_size * 2 - 1) // (cp_size * 2)) for sq in q_lens)
 
-    actual = prepare_for_mirror_cp_tilelang(
+    actual = prepare_for_mirror_cp(
         cu_seqlens_q,
         cu_seqlens_k,
         cp_size,
@@ -277,7 +289,7 @@ def _assert_prepare_for_mirror_cp_matches_ref(
         pytest.param((17001,), (20000,), 1, 0, 128, id='multi-block-tail'),
     ],
 )
-def test_prepare_for_mirror_cp_tilelang_edge_cases(
+def test_prepare_for_mirror_cp_edge_cases(
     q_lens: tuple[int, ...],
     k_lens: tuple[int, ...],
     cp_size: int,
@@ -303,7 +315,7 @@ def test_prepare_for_mirror_cp_tilelang_edge_cases(
         (512, 128, 512, 8, 7, 32),
     ],
 )
-def test_prepare_for_mirror_cp_tilelang(
+def test_prepare_for_mirror_cp(
     batch_size: int,
     max_seqlen_q: int,
     max_context_len: int,
@@ -320,3 +332,61 @@ def test_prepare_for_mirror_cp_tilelang(
         cp_rank,
         compress_ratio,
     )
+
+
+def test_prepare_for_mirror_cp_compile() -> None:
+    cu_q = _npu_int([0, 7, 20])
+    cu_k = _npu_int([0, 10, 31])
+    compiled = torch.compile(prepare_for_mirror_cp, backend='npugraph_ex', fullgraph=True, dynamic=False)
+    events = []
+    for round_idx in range(3):
+        if round_idx == 1:
+            cu_q.copy_(_npu_int([0, 6, 20]))
+            cu_k.copy_(_npu_int([0, 11, 33]))
+        elif round_idx == 2:
+            cu_q = _npu_int([0, 5, 20])
+            cu_k = _npu_int([0, 9, 34])
+        args = (cu_q, cu_k, 2, 0, 4, 20, 12)
+        expected = prepare_for_mirror_cp_ref(*args)
+        actual, event = profiled_call(compiled, *args)
+        assert_tensor_outputs(actual, expected)
+        events.append(event)
+        del actual
+    assert_capture_and_replay(events)
+
+
+@pytest.mark.parametrize('batch_size', [0, 1, 2])
+def test_prepare_for_mirror_cp_empty(batch_size: int) -> None:
+    cu_q = _npu_int([0] * (batch_size + 1))
+    cu_k = _npu_int([8 * index for index in range(batch_size + 1)])
+    args = (cu_q, cu_k, 1, 0, 1, 0, 0)
+    expected = tuple(torch.zeros(length, dtype=torch.int32, device=cu_q.device) for length in (0, 0, 0, 0, 1, 1))
+    torch.library.opcheck(prepare_for_mirror_cp, args, test_utils=('test_schema', 'test_faketensor'))
+    assert_tensor_outputs(prepare_for_mirror_cp(*args), expected)
+    compiled = torch.compile(prepare_for_mirror_cp, backend='npugraph_ex', fullgraph=True, dynamic=False)
+    for _ in range(3):
+        result = compiled(*args)
+        assert_tensor_outputs(result, expected)
+        del result
+
+
+def test_prepare_for_mirror_cp_opcheck() -> None:
+    args = (_npu_int([0, 8]), _npu_int([0, 8]), 2, 0, 1, 8, 4)
+    torch.library.opcheck(prepare_for_mirror_cp, args, test_utils=('test_schema', 'test_faketensor'))
+
+
+def test_prepare_for_mirror_cp_compile_core_config(monkeypatch) -> None:
+    args = (_npu_int([0, 7, 20]), _npu_int([0, 10, 31]), 2, 0, 4, 20, 12)
+    expected = prepare_for_mirror_cp_ref(*args)
+    compiled = torch.compile(prepare_for_mirror_cp, backend='npugraph_ex', fullgraph=True, dynamic=False)
+    observations = (
+        record_jit_core_counts(monkeypatch, 'cann_ops_tilelang.attention.prepare_cp_mirror', '_precompute_tl_ascend'),
+        record_jit_core_counts(monkeypatch, 'cann_ops_tilelang.attention.prepare_cp_mirror', '_scatter_tl_ascend'),
+    )
+
+    def check_output():
+        actual = compiled(*args)
+        assert_tensor_outputs(actual, expected)
+        del actual
+
+    assert_core_config_recompiles(check_output, monkeypatch, observations)

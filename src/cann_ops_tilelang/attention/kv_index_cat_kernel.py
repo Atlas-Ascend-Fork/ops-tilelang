@@ -1,8 +1,6 @@
 import tilelang
 from tilelang.ascend import language as T
 
-from cann_ops_tilelang.config import get_num_vector_cores
-
 
 @tilelang.jit(
     out_idx=None,
@@ -17,6 +15,7 @@ def _kv_index_cat_tl_ascend(
     window_size: int,
     topk_tokens: int,
     out_stride: int,
+    num_cores: int,
 ) -> None:
     total_q = T.dynamic('total_q')
 
@@ -31,7 +30,6 @@ def _kv_index_cat_tl_ascend(
     vec_len = 64
     blocks_l = (window_size + block_size - 1) // block_size
     blocks_r = (topk_tokens + block_size - 1) // block_size
-    num_cores = get_num_vector_cores()
 
     @T.prim_func
     def _kv_index_cat(

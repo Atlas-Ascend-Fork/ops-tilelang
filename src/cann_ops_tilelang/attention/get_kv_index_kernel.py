@@ -4,8 +4,6 @@
 import tilelang
 from tilelang.ascend import language as T
 
-from cann_ops_tilelang.config import get_num_vector_cores
-
 
 def get_ascend_disable_smem_reuse_config() -> dict:
     pass_configs = {tilelang.PassConfigKey.TIR_DISABLE_VECTORIZE: True}
@@ -25,11 +23,11 @@ def _get_fused_dflash_get_input_tl_ascend(
     dflash_block_size: int,
     has_valid_token_mask: bool,
     has_gate_force_random: bool,
+    num_cores: int,
 ) -> None:
     real_cnt = T.dynamic('real_cnt')
     total_q = T.dynamic('total_q')
     kv_index_out_shape0 = T.dynamic('kv_index_out_shape0')
-    num_cores = get_num_vector_cores()
     vector_length = 64
     bs = dflash_block_size
     compact_kv = bs * padded_kv_len * 4 > 64 * 1024
