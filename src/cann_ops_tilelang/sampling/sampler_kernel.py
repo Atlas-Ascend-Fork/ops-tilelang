@@ -5,8 +5,6 @@ from typing import Any
 import tilelang
 from tilelang.ascend import language as T
 
-from cann_ops_tilelang.config import get_num_vector_cores
-
 
 @tilelang.jit(
     pass_configs={
@@ -16,13 +14,13 @@ from cann_ops_tilelang.config import get_num_vector_cores
 )
 def _get_logits_cur_by_step_tl_ascend(
     vocab_size: int,
+    num_cores: int,
 ) -> Any:
     total_q = T.dynamic('total_q')
     logits_stride_0 = T.dynamic('logits_stride_0')
     n = T.dynamic('n')
     block_dim = 4096
     num_dim_blocks = T.ceildiv(vocab_size, block_dim)
-    num_cores = get_num_vector_cores()
 
     @T.prim_func
     def _get_logits_cur_by_step(

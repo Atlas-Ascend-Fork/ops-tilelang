@@ -7,9 +7,13 @@ from cann_ops_tilelang.config import get_num_vector_cores, require_ascend, shoul
 from .sum_smaller_probs_kernel import _sum_smaller_probs_tl_ascend, _sum_smaller_probs_ub_bytes
 
 
+@torch.library.custom_op('cann_ops_tilelang::get_sum_smaller_probs', mutates_args=())
 def get_sum_smaller_probs(probs: torch.Tensor, sample_results: torch.Tensor) -> torch.Tensor:
     """Sum probabilities smaller than each sampled value with a stable tie break."""
-    require_ascend()
+    return _get_sum_smaller_probs_impl(probs, sample_results)
+
+
+def _validate_get_sum_smaller_probs(probs, sample_results):
     if not isinstance(probs, torch.Tensor) or not isinstance(sample_results, torch.Tensor):
         raise TypeError('probs and sample_results must be torch.Tensor instances.')
     if probs.device.type != 'npu' or sample_results.device != probs.device:
@@ -25,10 +29,15 @@ def get_sum_smaller_probs(probs: torch.Tensor, sample_results: torch.Tensor) -> 
     if probs.shape[1] <= 0:
         raise ValueError('vocab_size must be greater than zero.')
 
+
+def _get_sum_smaller_probs_impl(probs: torch.Tensor, sample_results: torch.Tensor) -> torch.Tensor:
+    require_ascend()
+    _validate_get_sum_smaller_probs(probs, sample_results)
     output = torch.empty((probs.shape[0],), dtype=probs.dtype, device=probs.device)
     if probs.shape[0] == 0:
         return output
-    num_cores = min(probs.shape[0], get_num_vector_cores())
+    num_cores = get_num_vector_cores()
+    num_cores = min(probs.shape[0], num_cores)
     pipeline_stages = 2 if probs.shape[0] >= 2 * num_cores else 1
     max_rows_per_core = (probs.shape[0] + num_cores - 1) // num_cores
     ub_bytes = _sum_smaller_probs_ub_bytes(probs.shape[1], pipeline_stages, max_rows_per_core)
@@ -41,3 +50,9 @@ def get_sum_smaller_probs(probs: torch.Tensor, sample_results: torch.Tensor) -> 
         print(kernel.get_kernel_source())
     kernel(probs, sample_results, output)
     return output
+
+
+@get_sum_smaller_probs.register_fake
+def _get_sum_smaller_probs_fake(probs, sample_results):
+    _validate_get_sum_smaller_probs(probs, sample_results)
+    return torch.empty((probs.shape[0],), dtype=probs.dtype, device=probs.device)

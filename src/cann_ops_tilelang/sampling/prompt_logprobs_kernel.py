@@ -5,8 +5,6 @@ from typing import Any
 import tilelang
 from tilelang.ascend import language as T
 
-from cann_ops_tilelang.config import get_num_vector_cores
-
 _UB_SIZE_950DT = 188416
 
 
@@ -34,12 +32,12 @@ def _rows_per_block(topk_cnt: int) -> int:
 )
 def _get_prompt_logprobs_tensor_tl_ascend(
     topk_cnt: int,
+    num_cores: int,
 ) -> Any:
     assert 0 < topk_cnt <= 47016, 'topk count must be in the range [1, 47016].'
     num_tokens = T.dynamic('num_tokens')
     logprobs_stride = T.dynamic('logprobs_stride')
     token_index_stride = T.dynamic('token_index_stride')
-    num_cores = get_num_vector_cores()
     vector_length = 64
     rows_per_block = _rows_per_block(topk_cnt)
     tail_base = (topk_cnt // vector_length) * vector_length

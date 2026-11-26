@@ -144,3 +144,15 @@ def test_get_prompt_logprobs_tensor_benchmark(
         time_us=t_us,
         extras={'bandwidth_gbs': total_bytes / 1e9 / (t_us / 1e6)},
     )
+
+
+@torch.inference_mode()
+def test_get_prompt_logprobs_tensor_compile():
+    from tests.sampling.test_sampler import check_sampling_graph
+
+    args = (
+        torch.tensor([1, 8, 99], dtype=torch.int32, device=get_device()),
+        torch.randn((3, 16), device=get_device()),
+        torch.arange(16, dtype=torch.int32, device=get_device()).repeat(3, 1),
+    )
+    check_sampling_graph(get_prompt_logprobs_tensor, get_prompt_logprobs_tensor_ref, args)

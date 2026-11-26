@@ -69,3 +69,14 @@ def test_sum_smaller_probs_benchmark(
         time_us=t_us,
         extras={'bandwidth_gbs': io_bytes / 1e9 / (t_us / 1e6)},
     )
+
+
+@torch.inference_mode()
+def test_get_sum_smaller_probs_compile():
+    from tests.sampling.test_sampler import check_sampling_graph
+
+    args = (
+        torch.rand((3, 256), device=get_device()),
+        torch.tensor([0, 127, -1], dtype=torch.int32, device=get_device()),
+    )
+    check_sampling_graph(get_sum_smaller_probs, sum_smaller_probs_ref, args)
