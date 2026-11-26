@@ -30,28 +30,15 @@ def _check_npu_tensor(
         raise ValueError(f'{name} must be contiguous.')
 
 
-def engram_hash(
-    ngram_token_ids: torch.Tensor,
-    multipliers: torch.Tensor,
-    vocab_sizes: torch.Tensor,
-    offsets: torch.Tensor,
-) -> torch.Tensor:
-    """Compute Engram n-gram hash embedding indices on Ascend.
-
-    ``ngram_token_ids`` has shape ``(num_tokens, max_ngram_size)`` and uses
-    INT32. ``multipliers`` uses INT64, while ``vocab_sizes`` and ``offsets``
-    use INT32. The caller must provide strictly positive vocabulary sizes.
-    """
-
+def _validate_engram_hash_metadata(
+    ngram_token_ids: torch.Tensor, multipliers: torch.Tensor, vocab_sizes: torch.Tensor, offsets: torch.Tensor
+) -> tuple:
     if not all(isinstance(tensor, torch.Tensor) for tensor in (ngram_token_ids, multipliers, vocab_sizes, offsets)):
         raise TypeError('ngram_token_ids, multipliers, vocab_sizes and offsets must be torch.Tensor instances.')
-
-    require_ascend()
     _check_npu_tensor('ngram_token_ids', ngram_token_ids, dtype=torch.int32)
     _check_npu_tensor('multipliers', multipliers, dtype=torch.int64, device=ngram_token_ids.device)
     _check_npu_tensor('vocab_sizes', vocab_sizes, dtype=torch.int32, device=ngram_token_ids.device)
     _check_npu_tensor('offsets', offsets, dtype=torch.int32, device=ngram_token_ids.device)
-
     if ngram_token_ids.ndim != 2:
         raise ValueError('ngram_token_ids must have shape (num_tokens, max_ngram_size).')
     num_tokens, max_ngram_size = ngram_token_ids.shape
@@ -72,39 +59,89 @@ def engram_hash(
         raise ValueError(
             f'multipliers must have shape {(num_ngram_layers, max_ngram_size)}, got {tuple(multipliers.shape)}.'
         )
-
     num_out_cols = (max_ngram_size - 1) * num_embed_table_per_ngram
     if offsets.shape != (num_ngram_layers, num_out_cols):
         raise ValueError(f'offsets must have shape {(num_ngram_layers, num_out_cols)}, got {tuple(offsets.shape)}.')
-    token_alignment = math.lcm(
-        8 // math.gcd(max_ngram_size, 8),
-        8 // math.gcd(num_out_cols, 8),
-    )
+    token_alignment = math.lcm(8 // math.gcd(max_ngram_size, 8), 8 // math.gcd(num_out_cols, 8))
     if 1024 // num_out_cols < token_alignment:
         raise ValueError(
             'the n-gram configuration exceeds the 1024-thread Ascend SimtVF limit: '
             f'max_ngram_size={max_ngram_size}, num_out_cols={num_out_cols}.'
         )
+    return (max_ngram_size, num_embed_table_per_ngram, num_ngram_layers, num_out_cols, num_tokens)
 
-    output = torch.empty(
-        (num_ngram_layers, num_tokens, num_out_cols),
-        dtype=torch.int32,
-        device=ngram_token_ids.device,
+
+def _get_hash_num_cores(tokens: torch.Tensor, num_layers: int) -> int:
+    if tokens.numel() == 0:
+        return 0
+    index = tokens.device.index
+    cores = get_num_vector_cores() if index == torch.npu.current_device() else get_num_vector_cores(index)
+    _validate_hash_num_cores(cores, num_layers, tokens.shape[0])
+    return cores
+
+
+def _validate_hash_num_cores(num_cores: int, num_layers: int, num_tokens: int) -> None:
+    if isinstance(num_cores, bool) or not isinstance(num_cores, int):
+        raise TypeError('num_cores must be an integer.')
+    if num_cores < 0 or (num_tokens and num_cores < num_layers):
+        raise ValueError(f'num_cores must cover {num_layers} n-gram layers for nonempty input, got {num_cores}.')
+
+
+def _engram_hash_impl(
+    ngram_token_ids: torch.Tensor,
+    multipliers: torch.Tensor,
+    vocab_sizes: torch.Tensor,
+    offsets: torch.Tensor,
+    *,
+    num_cores: int,
+) -> torch.Tensor:
+    """Compute Engram n-gram hash embedding indices on Ascend.
+
+    ``ngram_token_ids`` has shape ``(num_tokens, max_ngram_size)`` and uses
+    INT32. ``multipliers`` uses INT64, while ``vocab_sizes`` and ``offsets``
+    use INT32. The caller must provide strictly positive vocabulary sizes.
+    """
+    max_ngram_size, num_embed_table_per_ngram, num_ngram_layers, num_out_cols, num_tokens = (
+        _validate_engram_hash_metadata(ngram_token_ids, multipliers, vocab_sizes, offsets)
     )
+    require_ascend()
+    output = torch.empty((num_ngram_layers, num_tokens, num_out_cols), dtype=torch.int32, device=ngram_token_ids.device)
     if num_tokens == 0:
         return output
-
-    available_cores = get_num_vector_cores()
-    if num_ngram_layers > available_cores:
-        raise ValueError(
-            f'num_ngram_layers must not exceed the Ascend vector core count {available_cores}, got {num_ngram_layers}.'
-        )
-    kernel = get_engram_hash_kernel(
-        max_ngram_size,
-        num_ngram_layers,
-        num_embed_table_per_ngram,
-    )
+    _validate_hash_num_cores(num_cores, num_ngram_layers, num_tokens)
+    kernel = get_engram_hash_kernel(max_ngram_size, num_ngram_layers, num_embed_table_per_ngram, num_cores=num_cores)
     if should_print_kernel_source():
         print(kernel.get_kernel_source())
     kernel(ngram_token_ids, multipliers, vocab_sizes, offsets, output)
     return output
+
+
+@torch.library.custom_op(
+    'cann_ops_tilelang::engram_hash',
+    mutates_args=(),
+    schema='(Tensor ngram_token_ids, Tensor multipliers, Tensor vocab_sizes, Tensor offsets) -> Tensor',
+)
+def engram_hash(
+    ngram_token_ids: torch.Tensor,
+    multipliers: torch.Tensor,
+    vocab_sizes: torch.Tensor,
+    offsets: torch.Tensor,
+) -> torch.Tensor:
+    """Compute hash indices using internal core configuration and API graph invalidation."""
+    cores = _get_hash_num_cores(ngram_token_ids, vocab_sizes.shape[0])
+    return _engram_hash_impl(ngram_token_ids, multipliers, vocab_sizes, offsets, num_cores=cores)
+
+
+@engram_hash.register_fake
+def _engram_hash_fake(
+    ngram_token_ids: torch.Tensor,
+    multipliers: torch.Tensor,
+    vocab_sizes: torch.Tensor,
+    offsets: torch.Tensor,
+) -> torch.Tensor:
+    _validate_engram_hash_metadata(ngram_token_ids, multipliers, vocab_sizes, offsets)
+    return torch.empty(
+        (vocab_sizes.shape[0], ngram_token_ids.shape[0], offsets.shape[1]),
+        dtype=torch.int32,
+        device=ngram_token_ids.device,
+    )

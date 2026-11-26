@@ -68,24 +68,16 @@ def _reject_aliases(inputs: dict[str, torch.Tensor]) -> None:
                 raise ValueError(f'{left_name} and {right_name} must not share storage.')
 
 
-def _validate_matrix_inputs(
-    matrix: torch.Tensor,
-    row_scale: torch.Tensor,
-    col_scale: torch.Tensor,
-    eps: float,
-    *,
-    head_dim_alignment: int,
+def _validate_matrix_inputs_metadata(
+    matrix: torch.Tensor, row_scale: torch.Tensor, col_scale: torch.Tensor, eps: float, *, head_dim_alignment: int
 ) -> tuple[int, int, float]:
     if not all(isinstance(tensor, torch.Tensor) for tensor in (matrix, row_scale, col_scale)):
         raise TypeError('matrix, row_scale and col_scale must be torch.Tensor instances.')
     eps = _check_real('eps', eps, non_negative=True)
-
-    require_ascend()
     fp32 = (torch.float32,)
     _check_npu_tensor('matrix', matrix, dtypes=fp32)
     _check_npu_tensor('row_scale', row_scale, dtypes=fp32, device=matrix.device)
     _check_npu_tensor('col_scale', col_scale, dtypes=fp32, device=matrix.device)
-
     if matrix.ndim != 2:
         raise ValueError('matrix must have shape (num_rows, head_dim).')
     num_rows, head_dim = matrix.shape
@@ -95,32 +87,17 @@ def _validate_matrix_inputs(
         raise ValueError(f'row_scale must have shape ({num_rows},), got {tuple(row_scale.shape)}.')
     if col_scale.ndim != 1 or col_scale.shape[0] != head_dim:
         raise ValueError(f'col_scale must have shape ({head_dim},), got {tuple(col_scale.shape)}.')
-
-    _reject_aliases({'matrix': matrix, 'row_scale': row_scale, 'col_scale': col_scale})
-    return num_rows, head_dim, eps
+    return (num_rows, head_dim, eps)
 
 
-def engram_sinkhorn_momentum_update(
-    grad: torch.Tensor,
-    momentum_buffer: torch.Tensor,
-    beta1: float,
-    nesterov: bool = True,
-) -> torch.Tensor:
-    """Update Engram momentum in place and return the FP32 Sinkhorn input.
-
-    ``grad`` and ``momentum_buffer`` must be contiguous one-dimensional NPU
-    tensors with equal shape. Each tensor may use BF16 or FP32, independently,
-    and its length must be a multiple of 256. Computation is performed in FP32;
-    the updated momentum is converted back to ``momentum_buffer.dtype``.
-    """
-
+def _validate_engram_sinkhorn_momentum_update_metadata(
+    grad: torch.Tensor, momentum_buffer: torch.Tensor, beta1: float, nesterov: bool = True
+):
     if not isinstance(grad, torch.Tensor) or not isinstance(momentum_buffer, torch.Tensor):
         raise TypeError('grad and momentum_buffer must be torch.Tensor instances.')
     beta1 = _check_real('beta1', beta1)
     if not isinstance(nesterov, bool):
         raise TypeError('nesterov must be a bool.')
-
-    require_ascend()
     supported_dtypes = (torch.bfloat16, torch.float32)
     _check_npu_tensor('grad', grad, dtypes=supported_dtypes)
     _check_npu_tensor('momentum_buffer', momentum_buffer, dtypes=supported_dtypes, device=grad.device)
@@ -133,20 +110,49 @@ def engram_sinkhorn_momentum_update(
         )
     if grad.numel() % 256:
         raise ValueError(f'grad length must be a multiple of 256, got {grad.numel()}.')
-    _reject_aliases({'grad': grad, 'momentum_buffer': momentum_buffer})
+    return beta1
 
+
+def _get_sinkhorn_num_cores(tensor: torch.Tensor) -> int:
+    if tensor.numel() == 0:
+        return 0
+    device_index = None if tensor.device.index == torch.npu.current_device() else tensor.device.index
+    return get_num_vector_cores() if device_index is None else get_num_vector_cores(device_index)
+
+
+def _resolve_sinkhorn_num_cores(num_cores: int, work_items: int) -> int:
+    if isinstance(num_cores, bool) or not isinstance(num_cores, int):
+        raise TypeError('num_cores must be an integer.')
+    if num_cores < 0 or (work_items and num_cores == 0):
+        raise ValueError(f'num_cores must be positive for nonempty input, got {num_cores}.')
+    return min(num_cores, work_items)
+
+
+def _engram_sinkhorn_momentum_update_impl(
+    grad: torch.Tensor,
+    momentum_buffer: torch.Tensor,
+    beta1: float,
+    nesterov: bool = True,
+    *,
+    num_cores: int,
+) -> torch.Tensor:
+    """Update Engram momentum in place and return the FP32 Sinkhorn input.
+
+    ``grad`` and ``momentum_buffer`` must be contiguous one-dimensional NPU
+    tensors with equal shape. Each tensor may use BF16 or FP32, independently,
+    and its length must be a multiple of 256. Computation is performed in FP32;
+    the updated momentum is converted back to ``momentum_buffer.dtype``.
+    """
+    beta1 = _validate_engram_sinkhorn_momentum_update_metadata(grad, momentum_buffer, beta1, nesterov)
+    require_ascend()
+    _reject_aliases({'grad': grad, 'momentum_buffer': momentum_buffer})
     sinkhorn_input = torch.empty_like(momentum_buffer, dtype=torch.float32)
     if grad.numel() == 0:
         return sinkhorn_input
-
     num_tiles = (grad.numel() + _MOMENTUM_TILE_SIZE - 1) // _MOMENTUM_TILE_SIZE
-    num_cores = min(get_num_vector_cores(), num_tiles)
+    num_cores = _resolve_sinkhorn_num_cores(num_cores, num_tiles)
     kernel = get_engram_sinkhorn_momentum_update_kernel(
-        T.dtype(grad.dtype),
-        T.dtype(momentum_buffer.dtype),
-        nesterov,
-        beta1,
-        num_cores,
+        T.dtype(grad.dtype), T.dtype(momentum_buffer.dtype), nesterov, beta1, num_cores
     )
     if should_print_kernel_source():
         print(kernel.get_kernel_source())
@@ -154,11 +160,22 @@ def engram_sinkhorn_momentum_update(
     return sinkhorn_input
 
 
-def engram_sinkhorn_step(
+def _validate_engram_sinkhorn_step_metadata(
+    matrix: torch.Tensor, row_scale: torch.Tensor, col_scale: torch.Tensor, eps: float
+) -> tuple:
+    num_rows, head_dim, eps = _validate_matrix_inputs_metadata(
+        matrix, row_scale, col_scale, eps, head_dim_alignment=256
+    )
+    return (head_dim, num_rows, eps)
+
+
+def _engram_sinkhorn_step_impl(
     matrix: torch.Tensor,
     row_scale: torch.Tensor,
     col_scale: torch.Tensor,
     eps: float,
+    *,
+    num_cores: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Normalize one Engram Sinkhorn iterate over rows.
 
@@ -168,23 +185,17 @@ def engram_sinkhorn_step(
     The caller must provide non-negative Sinkhorn scaling factors in
     ``row_scale``.
     """
-
-    num_rows, head_dim, eps = _validate_matrix_inputs(
-        matrix,
-        row_scale,
-        col_scale,
-        eps,
-        head_dim_alignment=256,
-    )
+    head_dim, num_rows, eps = _validate_engram_sinkhorn_step_metadata(matrix, row_scale, col_scale, eps)
+    require_ascend()
+    _reject_aliases({'matrix': matrix, 'row_scale': row_scale, 'col_scale': col_scale})
     if num_rows == 0:
-        return torch.empty_like(row_scale), torch.zeros_like(col_scale)
-
-    num_cores = min(get_num_vector_cores(), num_rows)
+        return (torch.empty_like(row_scale), torch.zeros_like(col_scale))
+    num_cores = _resolve_sinkhorn_num_cores(num_cores, num_rows)
     row_bytes = head_dim * matrix.element_size()
     if row_bytes >= 16 * 1024:
-        chunk_rows, num_stages = 1, 6
+        chunk_rows, num_stages = (1, 6)
     else:
-        chunk_rows = max(1, (50 * 1024) // row_bytes)
+        chunk_rows = max(1, 50 * 1024 // row_bytes)
         num_stages = 3
     rows_per_core = (num_rows + num_cores - 1) // num_cores
     shared_ub_bytes = (
@@ -200,56 +211,48 @@ def engram_sinkhorn_step(
         )
     row_norm = torch.empty_like(row_scale)
     col_sumsq = torch.zeros_like(col_scale)
-    kernel = get_engram_sinkhorn_step_kernel(
-        head_dim,
-        eps,
-        num_cores,
-        rows_per_core,
-        chunk_rows,
-        num_stages,
-    )
+    kernel = get_engram_sinkhorn_step_kernel(head_dim, eps, num_cores, rows_per_core, chunk_rows, num_stages)
     if should_print_kernel_source():
         print(kernel.get_kernel_source())
     kernel(matrix, row_scale, col_scale, row_norm, col_sumsq)
-    return row_norm, col_sumsq
+    return (row_norm, col_sumsq)
 
 
-def engram_sinkhorn_finalize(
+def _validate_engram_sinkhorn_finalize_metadata(
     matrix: torch.Tensor,
     row_scale: torch.Tensor,
     col_scale: torch.Tensor,
     eps: float,
     alpha: float,
-    out: torch.Tensor | None = None,
+) -> tuple:
+    num_rows, head_dim, eps = _validate_matrix_inputs_metadata(matrix, row_scale, col_scale, eps, head_dim_alignment=64)
+    alpha = _check_real('alpha', alpha)
+    return (head_dim, num_rows, alpha, eps)
+
+
+def _engram_sinkhorn_finalize_impl(
+    matrix: torch.Tensor,
+    row_scale: torch.Tensor,
+    col_scale: torch.Tensor,
+    eps: float,
+    alpha: float,
+    *,
+    num_cores: int,
 ) -> torch.Tensor:
     """Materialize the final row-normalized Engram Sinkhorn matrix.
 
     The three inputs must be contiguous FP32 NPU tensors and ``head_dim`` must
-    be a positive multiple of 64. ``out`` may be supplied as a separate,
-    contiguous FP32 output tensor with the same shape and device as ``matrix``.
+    be a positive multiple of 64. The result is a newly allocated contiguous
+    FP32 tensor with the same shape and device as ``matrix``.
     """
-
-    num_rows, head_dim, eps = _validate_matrix_inputs(
-        matrix,
-        row_scale,
-        col_scale,
-        eps,
-        head_dim_alignment=64,
+    head_dim, num_rows, alpha, eps = _validate_engram_sinkhorn_finalize_metadata(
+        matrix, row_scale, col_scale, eps, alpha
     )
-    alpha = _check_real('alpha', alpha)
-    if out is not None:
-        if not isinstance(out, torch.Tensor):
-            raise TypeError('out must be a torch.Tensor when provided.')
-        _check_npu_tensor('out', out, dtypes=(torch.float32,), device=matrix.device)
-        if out.shape != matrix.shape:
-            raise ValueError(f'out must have shape {tuple(matrix.shape)}, got {tuple(out.shape)}.')
-        _reject_aliases({'matrix': matrix, 'row_scale': row_scale, 'col_scale': col_scale, 'out': out})
-    else:
-        out = torch.empty_like(matrix)
-
+    require_ascend()
+    _reject_aliases({'matrix': matrix, 'row_scale': row_scale, 'col_scale': col_scale})
+    out = torch.empty_like(matrix)
     if num_rows == 0:
         return out
-
     num_stages = 6 if head_dim <= 512 else 3
     row_bytes = head_dim * matrix.element_size()
     shared_ub_bytes = (2 * num_stages + 1) * row_bytes + num_stages * row_scale.element_size()
@@ -258,9 +261,87 @@ def engram_sinkhorn_finalize(
             'the requested head_dim exceeds the 248 KiB shared UB capacity: '
             f'head_dim={head_dim}, required_bytes={shared_ub_bytes}.'
         )
-    num_cores = min(get_num_vector_cores(), num_rows)
+    num_cores = _resolve_sinkhorn_num_cores(num_cores, num_rows)
     kernel = get_engram_sinkhorn_finalize_kernel(head_dim, eps, alpha, num_cores)
     if should_print_kernel_source():
         print(kernel.get_kernel_source())
     kernel(matrix, row_scale, col_scale, out)
     return out
+
+
+@torch.library.custom_op(
+    'cann_ops_tilelang::engram_sinkhorn_momentum_update',
+    mutates_args=('momentum_buffer',),
+    schema='(Tensor grad, Tensor(a!) momentum_buffer, Scalar beta1, Any? nesterov=True) -> Tensor',
+)
+def engram_sinkhorn_momentum_update(
+    grad: torch.Tensor,
+    momentum_buffer: torch.Tensor,
+    beta1: float,
+    nesterov: bool = True,
+) -> torch.Tensor:
+    """Update momentum in place and return FP32 values; nesterov must be a bool."""
+    _validate_engram_sinkhorn_momentum_update_metadata(grad, momentum_buffer, beta1, nesterov)
+    cores = _get_sinkhorn_num_cores(grad)
+    return _engram_sinkhorn_momentum_update_impl(grad, momentum_buffer, beta1, nesterov, num_cores=cores)
+
+
+@engram_sinkhorn_momentum_update.register_fake
+def _engram_sinkhorn_momentum_update_fake(
+    grad: torch.Tensor,
+    momentum_buffer: torch.Tensor,
+    beta1: float,
+    nesterov: bool = True,
+) -> torch.Tensor:
+    _validate_engram_sinkhorn_momentum_update_metadata(grad, momentum_buffer, beta1, nesterov)
+    return torch.empty_like(momentum_buffer, dtype=torch.float32)
+
+
+@torch.library.custom_op(
+    'cann_ops_tilelang::engram_sinkhorn_step',
+    mutates_args=('row_scale',),
+    schema='(Tensor matrix, Tensor(a!) row_scale, Tensor col_scale, Scalar eps) -> (Tensor, Tensor)',
+)
+def engram_sinkhorn_step(
+    matrix: torch.Tensor, row_scale: torch.Tensor, col_scale: torch.Tensor, eps: float
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Update row_scale in place and return row norms and column squared sums."""
+    cores = _get_sinkhorn_num_cores(matrix)
+    return _engram_sinkhorn_step_impl(matrix, row_scale, col_scale, eps, num_cores=cores)
+
+
+@engram_sinkhorn_step.register_fake
+def _engram_sinkhorn_step_fake(
+    matrix: torch.Tensor, row_scale: torch.Tensor, col_scale: torch.Tensor, eps: float
+) -> tuple[torch.Tensor, torch.Tensor]:
+    _validate_engram_sinkhorn_step_metadata(matrix, row_scale, col_scale, eps)
+    return torch.empty_like(row_scale), torch.empty_like(col_scale)
+
+
+@torch.library.custom_op(
+    'cann_ops_tilelang::engram_sinkhorn_finalize',
+    mutates_args=(),
+    schema='(Tensor matrix, Tensor row_scale, Tensor col_scale, Scalar eps, Scalar alpha) -> Tensor',
+)
+def engram_sinkhorn_finalize(
+    matrix: torch.Tensor,
+    row_scale: torch.Tensor,
+    col_scale: torch.Tensor,
+    eps: float,
+    alpha: float,
+) -> torch.Tensor:
+    """Allocate and return the final Sinkhorn matrix with the same shape as matrix."""
+    cores = _get_sinkhorn_num_cores(matrix)
+    return _engram_sinkhorn_finalize_impl(matrix, row_scale, col_scale, eps, alpha, num_cores=cores)
+
+
+@engram_sinkhorn_finalize.register_fake
+def _engram_sinkhorn_finalize_fake(
+    matrix: torch.Tensor,
+    row_scale: torch.Tensor,
+    col_scale: torch.Tensor,
+    eps: float,
+    alpha: float,
+) -> torch.Tensor:
+    _validate_engram_sinkhorn_finalize_metadata(matrix, row_scale, col_scale, eps, alpha)
+    return torch.empty_like(matrix)

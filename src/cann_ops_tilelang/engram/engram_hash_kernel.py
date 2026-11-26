@@ -5,19 +5,19 @@ import math
 import tilelang
 from tilelang.ascend import language as T
 
-from cann_ops_tilelang.config import get_num_vector_cores
-
 
 @tilelang.jit
 def get_engram_hash_kernel(
     max_ngram_size: int = 3,
     num_ngram_layers: int = 2,
     num_embed_table_per_ngram: int = 8,
+    *,
+    num_cores: int,
 ):
     """Build the Engram hash kernel for Ascend vector cores."""
 
     num_tokens = T.dynamic('num_tokens')
-    available_cores = get_num_vector_cores()
+    available_cores = num_cores
     cores_per_layer = available_cores // num_ngram_layers
     num_out_cols = (max_ngram_size - 1) * num_embed_table_per_ngram
     max_simt_threads = 1024
