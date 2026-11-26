@@ -10,16 +10,14 @@ description: 为本仓库 Ascend TileLang 算子接入 torch.compile 的 npugrap
 ## 1. 确认环境与算子契约
 
 - 在目标仓库和分支操作，读取适用的 `AGENTS.md`，保留已有修改。检查 Python、torch、torch_npu、TileLang、CANN 和设备版本，在执行测试的 shell 中加载实际安装的 Ascend 环境脚本。
-- 阅读目标公共接口、wrapper、kernel、reference、测试及配置；基础封装参考 `src/cann_ops_tilelang/engram/engram_fused_weight.py` 和 `tests/engram/test_engram_fused_weight.py`。可选统计量、硬件核数等复杂契约再参考 `src/cann_ops_tilelang/engram/engram_gate.py`、`src/cann_ops_tilelang/config.py` 和对应测试。
-- 明确输入限制、输出结构与元信息、可选返回、`out=`、所有写入参数、存储别名、空输入及配置依赖。保留公共签名、默认值、返回语义和原有数值标准；优先调整封装，保留 kernel 数学逻辑及调度。
+- 阅读目标公共接口、kernel、reference、测试及配置；基础封装参考 `src/cann_ops_tilelang/engram/engram_fused_weight.py` 和 `tests/engram/test_engram_fused_weight.py`。可选统计量、硬件核数等复杂契约再参考 `src/cann_ops_tilelang/engram/engram_gate.py`、`src/cann_ops_tilelang/config.py` 和对应测试。
+- 明确输入限制、输出结构与元信息、可选返回、所有写入参数、存储别名、空输入及配置依赖。输出统一通过函数返回值提供；原接口同时支持输出参数和函数返回值时，仅实现函数返回值路径。其余公共签名、默认值、返回语义和原有数值标准保持不变；优先调整封装，保留 kernel 数学逻辑及调度。
 
 ## 2. 封装 custom_op 与 fake
 
-将元信息校验拆为 `_validate_*`，将运行环境检查、分配、TileLang JIT 和 launch 保留在 `_impl`。公共函数直接使用 `@torch.library.custom_op` 注册，eager 和 compile 统一经该 op 调用 `_impl`。
+将元信息校验拆为 `_validate_*`，将运行环境检查、分配、TileLang JIT 和 launch 保留在 `_impl`。在对外公共函数上方直接使用 `@torch.library.custom_op` 注册，使公共接口本身成为 `CustomOpDef`；eager 和 compile 统一经该 op 调用 `_impl`，不再增加外层封装函数。
 
 公共注册名、真实实现和 fake 以公共函数名统一命名，例如 `target`、`_target_impl`、`_target_fake` 和 `cann_ops_tilelang::target`。不要仅为传入内部调度配置而扩展公共签名。
-
-选择显式内部配置参数、处理 `out=` 分支、返回输入别名或在 schema 转换前严格校验参数时，可保留薄 wrapper；wrapper 在 eager 和 compile 下均调用内部注册 op，不按执行模式分流到不同实现。
 
 以下模板以单输入、单输出且真实实现用 `empty_like(x)` 分配输出的函数式算子为例；按实际接口实现 `_target_impl`、校验和 fake 分配：
 
@@ -51,11 +49,8 @@ fake 只使用元信息，返回与真实执行一致的 shape、dtype、device�
 | 场景 | 实现要求 |
 | --- | --- |
 | 可选 Tensor 返回 | 使用准确的 schema，例如 `(Tensor x, bool save_stats=True) -> (Tensor, Tensor?)`。PyTorch 2.10 对部分可选 Tensor 元组不能自动推导；核对参数、默认值及每个返回分支。 |
-| 严格标量类型 | schema 可能将 `0/1` 转换为 bool。需要保留原始 Python 类型限制时，在公共 wrapper 调用 op 前校验；仅在 fake 或真实实现中校验转换后的值不足以保持原有契约。 |
-| 原地更新 | `mutates_args` 列出所有被写入参数，包括 cache、out、scale 和辅助状态；仅不写输入时使用空元组。 |
-| 更新后返回输入别名 | 参考 PyTorch 2.10 的高层 custom_op 不允许返回输入别名。内部 op 声明 mutation、返回 `None`，fake 也返回 `None`；公共 wrapper 在 op 调用后返回原缓冲区。验证 functionalization/copy-back 后的写入与存储别名。 |
-| `out=None` 与 `out=tensor` | 分别注册分配输出、写入缓冲区的稳定契约，由公共接口分流并保留 `out=`。复杂别名按当前注册机制实现。 |
-| 输出、计算或调度依赖可变配置 | 根据注册约束选择配置 API 自动失效或内部有类型参数，按下节处理；公共接口不新增参数。 |
+| 原地更新 | `mutates_args` 列出所有被写入参数，包括 cache、scale 和辅助状态；仅不写输入时使用空元组。 |
+| 输出、计算或调度依赖可变配置 | 由配置 API 自动使编译缓存失效，按下节处理；公共接口不新增配置参数。 |
 | 输出长度依赖数据 | 使用后端支持的表示；fake 不读设备数据或虚构固定 shape。容量化、填充或接口调整必须满足原有契约。 |
 
 编译路径中的 `posix.stat` 等环境探测应移出追踪，真实执行仍保留 `require_ascend()`；优先在对应算子内适配，避免改变通用配置行为。
@@ -71,8 +66,6 @@ fake 只使用元信息，返回与真实执行一致的 shape、dtype、device�
 - 配置层记录实际依赖的配置键，在变更成功后刷新查询缓存，并仅在键变化时调用 `torch.compiler.reset()`；重复同值不触发重置，setter 拒绝非法参数时保留原配置及编译缓存。
 - 覆盖配置设置、恢复默认及查询缓存刷新入口；环境变量同时跟踪存在性和值，运行时修改后须通过配置 API 通知，直接修改环境变量不保证已编译图自动失效。
 - 配置变更后，复用同一个 compiled 对象，下次调用重新编译。进程级 reset 会影响其他 compiled 函数，应在编译调用之外更新配置。
-
-允许公共薄 wrapper 时，可用有明确类型和含义的内部参数表达实际配置依赖，贯穿 **wrapper → Custom Op → _impl → JIT 工厂及 launch**。下游使用传入值，避免再次读取全局配置；fake 按依赖使用同一值。
 
 - 仅处理目标算子实际依赖的配置，复用 helper 做解析和校验，保留设备选择、覆盖规则及空输入短路。优先传递实际参与执行的参数；确需额外的图失效标记时说明必要性。
 - 每层缓存键覆盖其静态依赖；外层缓存失效不代表内层 JIT 失效。不用缓存装饰器或常量化声明冻结可变配置。
