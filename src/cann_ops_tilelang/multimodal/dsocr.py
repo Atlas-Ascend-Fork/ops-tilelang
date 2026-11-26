@@ -21,7 +21,6 @@ def _validate_attn_rel_h_rel_w_inputs(
     tensors = (q, k, v, rel_h, rel_w)
     if not all(isinstance(tensor, torch.Tensor) for tensor in tensors):
         raise TypeError('q, k, v, rel_h and rel_w must be torch.Tensor instances.')
-    require_ascend()
     if any(tensor.device.type != 'npu' for tensor in tensors):
         raise ValueError('all inputs must be NPU tensors.')
     if any(tensor.device != q.device for tensor in tensors[1:]):
@@ -48,7 +47,7 @@ def _validate_attn_rel_h_rel_w_inputs(
     return batch, sequence, heads, dim
 
 
-def attn_rel_h_rel_w(
+def _attn_rel_h_rel_w_impl(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -58,13 +57,35 @@ def attn_rel_h_rel_w(
     """Compute relative-height/width attention on an Ascend NPU."""
 
     batch, sequence, heads, dim = _validate_attn_rel_h_rel_w_inputs(q, k, v, rel_h, rel_w)
+    require_ascend()
     query_blocks = (sequence + 127) // 128
     num_tasks = batch * heads * query_blocks
+    num_cores = min(get_num_ai_cores(), num_tasks)
     kernel = _attn_rel_h_rel_w_tl_ascend(
         heads=heads,
         seq_len=sequence,
         dim=dim,
         num_tasks=num_tasks,
-        num_cores=min(get_num_ai_cores(), num_tasks),
+        num_cores=num_cores,
     )
-    return kernel(q, k, v, rel_h, rel_w)
+    output = torch.empty(q.shape, dtype=q.dtype, device=q.device)
+    kernel(q, k, v, rel_h, rel_w, output)
+    return output
+
+
+@torch.library.custom_op('cann_ops_tilelang::attn_rel_h_rel_w', mutates_args=())
+def attn_rel_h_rel_w(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    rel_h: torch.Tensor,
+    rel_w: torch.Tensor,
+) -> torch.Tensor:
+    """Compute relative-height/width attention on an Ascend NPU."""
+    return _attn_rel_h_rel_w_impl(q, k, v, rel_h, rel_w)
+
+
+@attn_rel_h_rel_w.register_fake
+def _attn_rel_h_rel_w_fake(q, k, v, rel_h, rel_w):
+    _validate_attn_rel_h_rel_w_inputs(q, k, v, rel_h, rel_w)
+    return torch.empty(q.shape, dtype=q.dtype, device=q.device)

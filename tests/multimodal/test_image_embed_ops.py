@@ -15,6 +15,12 @@ from cann_ops_tilelang.multimodal.image_embed_ops import (
 pytestmark = pytest.mark.npu
 
 
+@pytest.fixture(autouse=True)
+def _reset_compiler_between_cases():
+    torch.compiler.reset()
+    yield
+
+
 def replace_input_embeds_ref(
     input_embeds: torch.Tensor,  # [num_tokens, hidden]
     input_ids: torch.Tensor,  # [num_tokens]
@@ -496,3 +502,255 @@ def _build_fake_bmp(height: int, width: int, bottom_up: bool = True):
     raw_bytes = header + dib + pixel_bytes.cpu().numpy().tobytes()
 
     return raw_bytes, row_stride
+
+
+def _compiled_call(compiled, *args):
+    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]) as profile:
+        result = compiled(*args)
+        torch.npu.synchronize()
+    events = {event.key: event.count for event in profile.key_averages()}
+    return result, events
+
+
+def _assert_graph_events(events):
+    assert any(event.get('acl_graph_capture', 0) for event in events), events
+    assert any(event.get('acl_graph_replay', 0) for event in events[1:]), events
+    assert not any(event.get('fx_run_eagerly', 0) for event in events), events
+
+
+@torch.inference_mode()
+def test_replace_input_embeds_compile() -> None:
+    import torch_npu  # noqa: F401
+
+    data = build_image_data(64, 4096, 2, 8)
+    input_embeds = data['input_embeds'].clone()
+    compiled = torch.compile(replace_input_embeds, backend='npugraph_ex', fullgraph=True, dynamic=False)
+    events = []
+    for round_idx in range(3):
+        if round_idx == 1:
+            input_embeds.copy_(torch.randn_like(input_embeds))
+            data['images_embeds'].copy_(torch.randn_like(data['images_embeds']))
+        elif round_idx == 2:
+            input_embeds = torch.randn_like(input_embeds)
+            data['images_embeds'] = torch.randn_like(data['images_embeds'])
+        before = input_embeds.clone()
+        expected = input_embeds.clone()
+        replace_input_embeds_ref(
+            expected,
+            data['input_ids'],
+            data['images_embeds'],
+            data['image_token_id'],
+            data['image_pad_token_ids'],
+            data['image_pad_embeds'],
+        )
+        ptr = input_embeds.data_ptr()
+        actual, event = _compiled_call(
+            compiled,
+            input_embeds,
+            data['input_ids'],
+            data['images_embeds'],
+            data['image_token_id'],
+            data['image_pad_token_ids'],
+            data['image_pad_embeds'],
+        )
+        events.append(event)
+        assert actual is None and input_embeds.data_ptr() == ptr
+        assert torch.equal(input_embeds, expected)
+        assert torch.equal(input_embeds[data['input_ids'] == 0], before[data['input_ids'] == 0])
+    _assert_graph_events(events)
+    torch.library.opcheck(
+        replace_input_embeds,
+        (
+            input_embeds,
+            data['input_ids'],
+            data['images_embeds'],
+            data['image_token_id'],
+            data['image_pad_token_ids'],
+            data['image_pad_embeds'],
+        ),
+        test_utils=('test_schema', 'test_faketensor'),
+    )
+
+
+@torch.inference_mode()
+def test_shuffle_image_tokens_compile() -> None:
+    import torch_npu  # noqa: F401
+
+    data = build_image_data(64, 4096, 2, 8)
+    input_embeds = data['input_embeds'].clone()
+    compiled = torch.compile(shuffle_image_tokens, backend='npugraph_ex', fullgraph=True, dynamic=False)
+    events = []
+    for round_idx in range(3):
+        if round_idx == 1:
+            input_embeds.copy_(torch.randn_like(input_embeds))
+        elif round_idx == 2:
+            input_embeds = torch.randn_like(input_embeds)
+        before = input_embeds.clone()
+        expected = input_embeds.clone()
+        shuffle_image_tokens_ref(expected, data['image_real_offsets'], data['image_real_sizes'])
+        ptr = input_embeds.data_ptr()
+        actual, event = _compiled_call(
+            compiled, input_embeds, data['image_real_offsets'], data['image_real_sizes'], data['image_ids']
+        )
+        events.append(event)
+        assert actual is None and input_embeds.data_ptr() == ptr
+        assert torch.equal(input_embeds, expected)
+        untouched = data['input_ids'] != data['image_token_id']
+        assert torch.equal(input_embeds[untouched], before[untouched])
+    _assert_graph_events(events)
+    torch.library.opcheck(
+        shuffle_image_tokens,
+        (
+            input_embeds,
+            data['image_real_offsets'],
+            data['image_real_sizes'],
+            data['image_ids'],
+        ),
+        test_utils=('test_schema', 'test_faketensor'),
+    )
+
+
+@pytest.mark.parametrize('case,win_size', [('single', 2), ('owner', 1), ('owner', 2), ('flat', 2)])
+@torch.inference_mode()
+def test_prepare_image_attn_pos_id_compile(case: str, win_size: int) -> None:
+    import torch_npu  # noqa: F401
+
+    device = get_device()
+    profiles = {
+        'single': ([[2, 2]], [[4, 1]], [[1, 4]]),
+        'owner': ([[2, 2], [1, 4]], [[4, 1], [2, 2]], [[1, 4], [4, 1]]),
+        'flat': ([[1, 5000], [1, 5000]], [[2, 2500], [2500, 2]], [[5000, 1], [5000, 1]]),
+    }
+    profile = profiles.get(case)
+    assert profile is not None
+    initial, updated, replacement = profile
+    offsets = [0]
+    for width, height in initial:
+        offsets.append(offsets[-1] + width * height)
+    total = offsets[-1]
+    crops = torch.tensor(initial, dtype=torch.int32, device=device)
+    cu = torch.tensor(offsets, dtype=torch.int32, device=device)
+    compiled = torch.compile(prepare_image_attn_pos_id, backend='npugraph_ex', fullgraph=True, dynamic=False)
+    events = []
+    for round_idx in range(3):
+        if round_idx == 1:
+            crops.copy_(torch.tensor(updated, dtype=torch.int32, device=device))
+        elif round_idx == 2:
+            crops = torch.tensor(replacement, dtype=torch.int32, device=device)
+            cu = cu.clone()
+        expected = prepare_image_attn_pos_id_ref(crops, cu, total, win_size)
+        actual, event = _compiled_call(compiled, crops, cu, total, win_size)
+        events.append(event)
+        assert len(actual) == 2
+        for output, reference in zip(actual, expected, strict=True):
+            assert output.shape == (total, 2) and output.dtype == torch.int32 and output.device == device
+            assert torch.equal(output, reference.to(device))
+        del actual
+    _assert_graph_events(events)
+    torch.library.opcheck(
+        prepare_image_attn_pos_id,
+        (crops, cu, total, win_size),
+        test_utils=('test_schema', 'test_faketensor'),
+    )
+
+
+@pytest.mark.parametrize('patch_size', [1, 2])
+@pytest.mark.parametrize('mean,std', [(0.48145466, 0.26862954), (0.5, 0.25)])
+@torch.inference_mode()
+def test_bmp_to_patches_compile(patch_size: int, mean: float, std: float) -> None:
+    import torch_npu  # noqa: F401
+
+    device = get_device()
+    raw0, stride = _build_fake_bmp(2, 2, bottom_up=False)
+    raw1, _ = _build_fake_bmp(2, 2, bottom_up=True)
+    pixels = torch.cat(
+        [
+            torch.frombuffer(bytearray(raw0), dtype=torch.uint8)[54:],
+            torch.frombuffer(bytearray(raw1), dtype=torch.uint8)[54:],
+        ]
+    ).to(device)
+    cu_raw = torch.tensor([0, 2 * stride, 4 * stride], dtype=torch.int32, device=device)
+    patches_per_image = (2 // patch_size) ** 2
+    crops = torch.tensor([[2 // patch_size, 2 // patch_size]] * 2, dtype=torch.int32, device=device)
+    cu_vit = torch.tensor([0, patches_per_image, 2 * patches_per_image], dtype=torch.int32, device=device)
+    strides = torch.tensor([stride, stride], dtype=torch.int32, device=device)
+    flips = torch.tensor([0, 1], dtype=torch.int32, device=device)
+    compiled = torch.compile(bmp_to_patches, backend='npugraph_ex', fullgraph=True, dynamic=False)
+    events = []
+    for round_idx in range(3):
+        if round_idx == 1:
+            pixels.copy_(torch.randint_like(pixels, 0, 256))
+        elif round_idx == 2:
+            pixels = torch.randint_like(pixels, 0, 256)
+        args = (pixels, cu_raw, crops, cu_vit, strides, flips, 2 * patches_per_image, patch_size, mean, std)
+        expected = bmp_to_patches_ref(
+            pixels.cpu(),
+            cu_raw.cpu(),
+            crops.cpu(),
+            cu_vit.cpu(),
+            strides.cpu(),
+            flips.cpu(),
+            2 * patches_per_image,
+            patch_size,
+            mean,
+            std,
+        )
+        actual, event = _compiled_call(compiled, *args)
+        events.append(event)
+        assert actual.shape == (2 * patches_per_image, 3, patch_size, patch_size)
+        assert actual.dtype == torch.bfloat16 and actual.device == device
+        torch.testing.assert_close(actual.cpu().float(), expected.float(), rtol=0, atol=0.01)
+        del actual
+    _assert_graph_events(events)
+    torch.library.opcheck(bmp_to_patches, args, test_utils=('test_schema', 'test_faketensor'))
+
+
+@torch.inference_mode()
+def test_replace_then_shuffle_compile() -> None:
+    """Exercise both mutations and a downstream read in one compiled graph."""
+    import torch_npu  # noqa: F401
+
+    data = build_image_data(64, 4096, 2, 8)
+    input_embeds = data['input_embeds'].clone()
+
+    def apply_both(embeds, ids, images, image_id, pad_ids, pads, offsets, sizes, image_ids):
+        replace_input_embeds(embeds, ids, images, image_id, pad_ids, pads)
+        shuffle_image_tokens(embeds, offsets, sizes, image_ids)
+        return embeds.sum()
+
+    compiled = torch.compile(apply_both, backend='npugraph_ex', fullgraph=True, dynamic=False)
+    events = []
+    for round_idx in range(3):
+        if round_idx == 1:
+            input_embeds.copy_(torch.randn_like(input_embeds))
+            data['images_embeds'].copy_(torch.randn_like(data['images_embeds']))
+        elif round_idx == 2:
+            input_embeds = torch.randn_like(input_embeds)
+            data['images_embeds'] = torch.randn_like(data['images_embeds'])
+        expected = input_embeds.clone()
+        replace_input_embeds_ref(
+            expected,
+            data['input_ids'],
+            data['images_embeds'],
+            data['image_token_id'],
+            data['image_pad_token_ids'],
+            data['image_pad_embeds'],
+        )
+        shuffle_image_tokens_ref(expected, data['image_real_offsets'], data['image_real_sizes'])
+        actual_sum, event = _compiled_call(
+            compiled,
+            input_embeds,
+            data['input_ids'],
+            data['images_embeds'],
+            data['image_token_id'],
+            data['image_pad_token_ids'],
+            data['image_pad_embeds'],
+            data['image_real_offsets'],
+            data['image_real_sizes'],
+            data['image_ids'],
+        )
+        events.append(event)
+        assert torch.equal(input_embeds, expected)
+        torch.testing.assert_close(actual_sum, expected.sum(), rtol=0, atol=0)
+        del actual_sum
+    _assert_graph_events(events)

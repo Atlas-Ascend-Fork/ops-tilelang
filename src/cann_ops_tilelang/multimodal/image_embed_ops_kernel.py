@@ -7,12 +7,11 @@ from tilelang.ascend.language import simd as S
 from tilelang.ascend.target import target_is_pto
 from tvm.target import Target
 
-from cann_ops_tilelang.config import get_num_vector_cores
-
 
 @tilelang.jit(out_idx=None)
 def _replace_input_embeds_tl_ascend(
     hidden: int,
+    num_cores: int,
     rows_per_core: int = 16384,
     batch_rows: int = 8,
 ) -> T.prim_func:
@@ -23,7 +22,6 @@ def _replace_input_embeds_tl_ascend(
     token_id_dtype = torch.int32
     embed_dtype = torch.bfloat16
 
-    num_cores = get_num_vector_cores()
     vec_size = 64
     max_groups = (rows_per_core + vec_size - 1) // vec_size
     max_pad_tokens = 8
@@ -193,6 +191,7 @@ def _replace_input_embeds_tl_ascend(
 )
 def _shuffle_image_tokens_gather_tl_ascend(
     hidden: int,
+    num_cores: int,
 ) -> T.prim_func:
     """Snapshot image tokens in their original order using tiled DMA."""
     num_tokens = T.dynamic('num_tokens')
@@ -202,7 +201,6 @@ def _shuffle_image_tokens_gather_tl_ascend(
     offset_dtype = torch.int32
     embed_dtype = torch.bfloat16
 
-    num_cores = get_num_vector_cores()
     rows_per_tile = 11
 
     @T.macro
@@ -288,6 +286,7 @@ def _shuffle_image_tokens_gather_tl_ascend(
 )
 def _shuffle_image_tokens_scatter_tl_ascend(
     hidden: int,
+    num_cores: int,
 ) -> T.prim_func:
     """Interleave the snapshot with contiguous reads and stride-2 DMA writes."""
     num_tokens = T.dynamic('num_tokens')
@@ -297,7 +296,6 @@ def _shuffle_image_tokens_scatter_tl_ascend(
     offset_dtype = torch.int32
     embed_dtype = torch.bfloat16
 
-    num_cores = get_num_vector_cores()
     rows_per_tile = 11
 
     @T.macro
@@ -416,7 +414,7 @@ def _shuffle_image_tokens_scatter_tl_ascend(
 
 
 @tilelang.jit(out_idx=None, pass_configs={tilelang.PassConfigKey.TL_ENABLE_AUTO_SCHEDULE: True})
-def _prepare_image_attn_pos_id_tl_ascend(pattern_id: str, owner_mode: str) -> T.prim_func:
+def _prepare_image_attn_pos_id_tl_ascend(pattern_id: str, owner_mode: str, num_cores: int) -> T.prim_func:
     if pattern_id not in ('single', 'owner', 'flat'):
         raise ValueError(f'unsupported prepare_image_attn_pos_id pattern: {pattern_id}')
     if pattern_id == 'owner' and owner_mode not in ('win1', 'window'):
@@ -426,7 +424,6 @@ def _prepare_image_attn_pos_id_tl_ascend(pattern_id: str, owner_mode: str) -> T.
     total_seqlens_vit = T.dynamic('total_seqlens_vit')
 
     dtype = torch.int32
-    num_cores = get_num_vector_cores()
     vector_lanes = 64
     # The two position outputs are int32 [row, col] records.  Each output
     # buffer is explicitly forced to two versions below, so one pipeline
@@ -886,7 +883,7 @@ def _prepare_image_attn_pos_id_tl_ascend(pattern_id: str, owner_mode: str) -> T.
 
 
 @tilelang.jit(out_idx=None, target='ascend')
-def _bmp_to_patches_tl_ascend(patch_size: int) -> T.prim_func:
+def _bmp_to_patches_tl_ascend(patch_size: int, num_cores: int) -> T.prim_func:
     """Ascend AIV implementation of ``bmp_to_patches``.
 
     Small patches use one padded, strided GM-to-UB copy; large patches retain
@@ -898,7 +895,6 @@ def _bmp_to_patches_tl_ascend(patch_size: int) -> T.prim_func:
 
     pixels_per_patch = patch_size * patch_size
     elems_per_patch = 3 * pixels_per_patch
-    num_cores = get_num_vector_cores()
     use_row_dma = patch_size <= 32
     threads = 256
     num_pixel_iters = (pixels_per_patch + threads - 1) // threads

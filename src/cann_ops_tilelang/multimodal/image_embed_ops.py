@@ -15,7 +15,7 @@ from .image_embed_ops_kernel import (
 )
 
 
-def replace_input_embeds(
+def _validate_replace_input_embeds_inputs(
     input_embeds: torch.Tensor,  # [num_tokens, hidden]
     input_ids: torch.Tensor,  # [num_tokens]
     images_embeds: torch.Tensor,  # [img_tokens, hidden]
@@ -23,7 +23,6 @@ def replace_input_embeds(
     image_pad_token_ids: torch.Tensor,  # [num_pad_tokens]
     image_pad_embeds: torch.Tensor,  # [num_pad_tokens, hidden]
 ) -> None:
-    require_ascend()
     tensors = (input_embeds, input_ids, images_embeds, image_pad_token_ids, image_pad_embeds)
     if any(tensor.device.type != 'npu' for tensor in tensors):
         raise ValueError('all inputs must be NPU tensors.')
@@ -44,14 +43,28 @@ def replace_input_embeds(
     if input_ids.dtype != torch.int32 or image_pad_token_ids.dtype != torch.int32:
         raise TypeError('token id tensors must use torch.int32.')
 
+
+def _replace_input_embeds_impl(
+    input_embeds: torch.Tensor,
+    input_ids: torch.Tensor,
+    images_embeds: torch.Tensor,
+    image_token_id: int,
+    image_pad_token_ids: torch.Tensor,
+    image_pad_embeds: torch.Tensor,
+) -> None:
+    _validate_replace_input_embeds_inputs(
+        input_embeds, input_ids, images_embeds, image_token_id, image_pad_token_ids, image_pad_embeds
+    )
+    require_ascend()
+    num_cores = get_num_vector_cores()
+
     # inclusive cumsum == src_row + 1 for image tokens (kernel-side encoding);
     # one eq + one cumsum instead of four host kernels
     image_token_offset = torch.cumsum(input_ids == image_token_id, dim=0, dtype=torch.int32)
     num_tokens_val = input_embeds.shape[0]
-    num_cores_val = get_num_vector_cores()
-    rows_per_core = (num_tokens_val + num_cores_val - 1) // num_cores_val
+    rows_per_core = (num_tokens_val + num_cores - 1) // num_cores
     kernel = _replace_input_embeds_tl_ascend
-    kernel(input_embeds.shape[-1], rows_per_core)(
+    kernel(input_embeds.shape[-1], num_cores=num_cores, rows_per_core=rows_per_core)(
         input_embeds,
         input_ids,
         images_embeds,
@@ -62,22 +75,12 @@ def replace_input_embeds(
     )
 
 
-def shuffle_image_tokens(
+def _validate_shuffle_image_tokens_inputs(
     input_embeds: torch.Tensor,  # [num_tokens, hidden]
     image_real_offsets: torch.Tensor,  # [num_imgs], int32
     image_real_sizes: torch.Tensor,  # [num_imgs], int32
     image_ids: torch.Tensor,  # [img_tokens], int32
 ) -> None:
-    """Shuffle image tokens in input_embeds using interleave pattern.
-
-    Equivalent to the following Python code for each image i:
-        offset = image_real_offsets[i]
-        size = image_real_sizes[i]
-        range_tensor = arange(size) + offset
-        range_tensor = range_tensor.reshape(2, -1).transpose(0, 1).reshape(-1)
-        input_embeds[offset: offset + size] = input_embeds[range_tensor]
-    """
-    require_ascend()
     tensors = (input_embeds, image_real_offsets, image_real_sizes, image_ids)
     if any(tensor.device.type != 'npu' for tensor in tensors):
         raise ValueError('all inputs must be NPU tensors.')
@@ -90,8 +93,18 @@ def shuffle_image_tokens(
     if image_real_offsets.shape != image_real_sizes.shape:
         raise ValueError('image_real_offsets and image_real_sizes must have the same shape.')
 
+
+def _shuffle_image_tokens_impl(
+    input_embeds: torch.Tensor,
+    image_real_offsets: torch.Tensor,
+    image_real_sizes: torch.Tensor,
+    image_ids: torch.Tensor,
+) -> None:
+    _validate_shuffle_image_tokens_inputs(input_embeds, image_real_offsets, image_real_sizes, image_ids)
+    require_ascend()
     img_tokens = image_ids.shape[0]
     hidden = input_embeds.shape[-1]
+    num_cores = get_num_vector_cores()
 
     # Precompute prefix sum of image_real_sizes as starting indices in the flat image token array
     img_token_starts = torch.zeros_like(image_real_sizes)
@@ -102,13 +115,13 @@ def shuffle_image_tokens(
     temp_buffer = torch.empty((img_tokens, hidden), dtype=input_embeds.dtype, device=input_embeds.device)
 
     # Phase 1: Gather from shuffled source positions into temp_buffer
-    _shuffle_image_tokens_gather_tl_ascend(hidden)(
+    _shuffle_image_tokens_gather_tl_ascend(hidden, num_cores)(
         input_embeds,
         image_real_offsets,
         img_token_starts,
         temp_buffer,
     )
-    _shuffle_image_tokens_scatter_tl_ascend(hidden)(
+    _shuffle_image_tokens_scatter_tl_ascend(hidden, num_cores)(
         input_embeds,
         image_real_offsets,
         image_real_sizes,
@@ -117,13 +130,12 @@ def shuffle_image_tokens(
     )
 
 
-def prepare_image_attn_pos_id(
+def _validate_prepare_image_attn_pos_id_inputs(
     images_spatial_crop: torch.Tensor,  # [num_imgs, 2], int32 or int64
     cu_seqlens_vit: torch.Tensor,  # [num_imgs + 1], int32
     total_seqlens_vit: int,
     win_size: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    require_ascend()
+) -> None:
     if images_spatial_crop.device.type != 'npu' or cu_seqlens_vit.device.type != 'npu':
         raise ValueError('image metadata must be NPU tensors.')
     if images_spatial_crop.device != cu_seqlens_vit.device:
@@ -142,6 +154,15 @@ def prepare_image_attn_pos_id(
     if win_size < 1:
         raise ValueError(f'win_size must be >= 1, got {win_size}')
 
+
+def _prepare_image_attn_pos_id_impl(
+    images_spatial_crop: torch.Tensor,
+    cu_seqlens_vit: torch.Tensor,
+    total_seqlens_vit: int,
+    win_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    _validate_prepare_image_attn_pos_id_inputs(images_spatial_crop, cu_seqlens_vit, total_seqlens_vit, win_size)
+    require_ascend()
     images_spatial_crop_i32 = images_spatial_crop.to(dtype=torch.int32)
     cu_seqlens_vit_i32 = cu_seqlens_vit.to(dtype=torch.int32)
 
@@ -157,7 +178,7 @@ def prepare_image_attn_pos_id(
     else:
         pattern_id = 'flat'
     owner_mode = ('win1' if win_size == 1 else 'window') if pattern_id == 'owner' else 'unused'
-    kernel = _prepare_image_attn_pos_id_tl_ascend(pattern_id, owner_mode)
+    kernel = _prepare_image_attn_pos_id_tl_ascend(pattern_id, owner_mode, get_num_vector_cores())
     kernel(
         images_spatial_crop_i32,
         cu_seqlens_vit_i32,
@@ -168,37 +189,16 @@ def prepare_image_attn_pos_id(
     return images_global_attn_pos_id, images_window_attn_pos_id
 
 
-def bmp_to_patches(
-    image_raw_concat: torch.Tensor,  # [total_raw_bytes], uint8
-    cu_raw_bytes: torch.Tensor,  # [num_imgs + 1], int32
-    images_spatial_crop: torch.Tensor,  # [num_imgs, 2], int32, [n_vit_w, n_vit_h]
-    cu_seqlens_vit: torch.Tensor,  # [num_imgs + 1], int32
-    row_strides: torch.Tensor,  # [num_imgs], int32
-    flip_flags: torch.Tensor,  # [num_imgs], int32
+def _validate_bmp_to_patches_inputs(
+    image_raw_concat: torch.Tensor,
+    metadata: tuple[torch.Tensor, ...],
     total_patches: int,
     patch_size: int,
     mean: float,
     std: float,
-) -> torch.Tensor:
-    """Convert concatenated BMP pixel data to normalized bfloat16 patch tensors.
-
-    Args:
-        image_raw_concat: All images' BMP pixel data concatenated, uint8.
-        cu_raw_bytes: Prefix sum of raw byte lengths, shape (num_imgs + 1,).
-        images_spatial_crop: [n_vit_w, n_vit_h] per image, shape (num_imgs, 2).
-        cu_seqlens_vit: Prefix sum of patch counts, shape (num_imgs + 1,).
-        row_strides: BMP row stride per image, shape (num_imgs,).
-        flip_flags: 1 if BMP is bottom-up (needs row flip), 0 otherwise, shape (num_imgs,).
-        total_patches: Total number of output patches.
-        patch_size: ViT patch size in pixels.
-        mean: Normalization mean (applied per channel, assumed same for all 3 channels).
-        std: Normalization std (applied per channel, assumed same for all 3 channels).
-
-    Returns:
-        output: (total_patches, 3, patch_size, patch_size), bfloat16.
-    """
-    require_ascend()
-    tensors = (image_raw_concat, cu_raw_bytes, images_spatial_crop, cu_seqlens_vit, row_strides, flip_flags)
+) -> None:
+    cu_raw_bytes, images_spatial_crop, cu_seqlens_vit, row_strides, flip_flags = metadata
+    tensors = (image_raw_concat, *metadata)
     if any(tensor.device.type != 'npu' for tensor in tensors):
         raise ValueError('all inputs must be NPU tensors.')
     if any(tensor.device != image_raw_concat.device for tensor in tensors[1:]):
@@ -217,10 +217,33 @@ def bmp_to_patches(
     if total_patches < 0 or patch_size <= 0 or std <= 0:
         raise ValueError('total_patches must be non-negative, patch_size and std must be positive.')
 
+
+def _bmp_to_patches_impl(
+    image_raw_concat: torch.Tensor,
+    cu_raw_bytes: torch.Tensor,
+    images_spatial_crop: torch.Tensor,
+    cu_seqlens_vit: torch.Tensor,
+    row_strides: torch.Tensor,
+    flip_flags: torch.Tensor,
+    *,
+    total_patches: int,
+    patch_size: int,
+    mean: float,
+    std: float,
+) -> torch.Tensor:
+    _validate_bmp_to_patches_inputs(
+        image_raw_concat,
+        (cu_raw_bytes, images_spatial_crop, cu_seqlens_vit, row_strides, flip_flags),
+        total_patches,
+        patch_size,
+        mean,
+        std,
+    )
+    require_ascend()
     output = torch.empty(
         (total_patches, 3, patch_size, patch_size), dtype=torch.bfloat16, device=image_raw_concat.device
     )
-    kernel = _bmp_to_patches_tl_ascend(patch_size)
+    kernel = _bmp_to_patches_tl_ascend(patch_size, get_num_vector_cores())
     kernel_output = output.view(total_patches, 3 * patch_size * patch_size)
     kernel_args = (
         image_raw_concat,
@@ -238,3 +261,116 @@ def bmp_to_patches(
     fp16_norm_safe = int(std > 0.0 and -norm_bound <= mean <= norm_bound and -norm_bound <= 1.0 - mean <= norm_bound)
     kernel(*kernel_args, fp16_norm_safe, kernel_output)
     return output
+
+
+@torch.library.custom_op('cann_ops_tilelang::replace_input_embeds', mutates_args=('input_embeds',))
+def replace_input_embeds(
+    input_embeds: torch.Tensor,
+    input_ids: torch.Tensor,
+    images_embeds: torch.Tensor,
+    image_token_id: int,
+    image_pad_token_ids: torch.Tensor,
+    image_pad_embeds: torch.Tensor,
+) -> None:
+    """Replace image and pad token embeddings in ``input_embeds`` in place."""
+    return _replace_input_embeds_impl(
+        input_embeds, input_ids, images_embeds, image_token_id, image_pad_token_ids, image_pad_embeds
+    )
+
+
+@replace_input_embeds.register_fake
+def _replace_input_embeds_fake(
+    input_embeds, input_ids, images_embeds, image_token_id, image_pad_token_ids, image_pad_embeds
+):
+    _validate_replace_input_embeds_inputs(
+        input_embeds, input_ids, images_embeds, image_token_id, image_pad_token_ids, image_pad_embeds
+    )
+
+
+@torch.library.custom_op('cann_ops_tilelang::shuffle_image_tokens', mutates_args=('input_embeds',))
+def shuffle_image_tokens(
+    input_embeds: torch.Tensor,
+    image_real_offsets: torch.Tensor,
+    image_real_sizes: torch.Tensor,
+    image_ids: torch.Tensor,
+) -> None:
+    """Interleave each image's embedding rows in ``input_embeds`` in place."""
+    return _shuffle_image_tokens_impl(input_embeds, image_real_offsets, image_real_sizes, image_ids)
+
+
+@shuffle_image_tokens.register_fake
+def _shuffle_image_tokens_fake(input_embeds, image_real_offsets, image_real_sizes, image_ids):
+    _validate_shuffle_image_tokens_inputs(input_embeds, image_real_offsets, image_real_sizes, image_ids)
+
+
+@torch.library.custom_op('cann_ops_tilelang::prepare_image_attn_pos_id', mutates_args=())
+def prepare_image_attn_pos_id(
+    images_spatial_crop: torch.Tensor,
+    cu_seqlens_vit: torch.Tensor,
+    total_seqlens_vit: int,
+    win_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return global and window position IDs for image attention."""
+    return _prepare_image_attn_pos_id_impl(images_spatial_crop, cu_seqlens_vit, total_seqlens_vit, win_size)
+
+
+@prepare_image_attn_pos_id.register_fake
+def _prepare_image_attn_pos_id_fake(images_spatial_crop, cu_seqlens_vit, total_seqlens_vit, win_size):
+    _validate_prepare_image_attn_pos_id_inputs(images_spatial_crop, cu_seqlens_vit, total_seqlens_vit, win_size)
+    shape = (total_seqlens_vit, 2)
+    return (
+        torch.empty(shape, dtype=torch.int32, device=images_spatial_crop.device),
+        torch.empty(shape, dtype=torch.int32, device=images_spatial_crop.device),
+    )
+
+
+@torch.library.custom_op('cann_ops_tilelang::bmp_to_patches', mutates_args=())
+def bmp_to_patches(
+    image_raw_concat: torch.Tensor,
+    cu_raw_bytes: torch.Tensor,
+    images_spatial_crop: torch.Tensor,
+    cu_seqlens_vit: torch.Tensor,
+    row_strides: torch.Tensor,
+    flip_flags: torch.Tensor,
+    total_patches: int,
+    patch_size: int,
+    mean: float,
+    std: float,
+) -> torch.Tensor:
+    """Convert concatenated BMP pixels to normalized BF16 image patches."""
+    return _bmp_to_patches_impl(
+        image_raw_concat,
+        cu_raw_bytes,
+        images_spatial_crop,
+        cu_seqlens_vit,
+        row_strides,
+        flip_flags,
+        total_patches=total_patches,
+        patch_size=patch_size,
+        mean=mean,
+        std=std,
+    )
+
+
+@bmp_to_patches.register_fake
+def _bmp_to_patches_fake(
+    image_raw_concat,
+    cu_raw_bytes,
+    images_spatial_crop,
+    cu_seqlens_vit,
+    row_strides,
+    flip_flags,
+    total_patches,
+    patch_size,
+    mean,
+    std,
+):
+    _validate_bmp_to_patches_inputs(
+        image_raw_concat,
+        (cu_raw_bytes, images_spatial_crop, cu_seqlens_vit, row_strides, flip_flags),
+        total_patches,
+        patch_size,
+        mean,
+        std,
+    )
+    return torch.empty((total_patches, 3, patch_size, patch_size), dtype=torch.bfloat16, device=image_raw_concat.device)

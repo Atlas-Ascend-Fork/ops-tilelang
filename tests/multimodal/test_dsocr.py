@@ -63,3 +63,45 @@ def test_attn_rel_h_rel_w(batch: int, side: int) -> None:
     expected = attn_rel_h_rel_w_ref(q, k, v, rel_h, rel_w)
     assert not torch.isnan(actual).any()
     torch.testing.assert_close(actual, expected, rtol=0.01, atol=0.005)
+
+
+@torch.inference_mode()
+def test_attn_rel_h_rel_w_compile() -> None:
+    """Check values and ACL Graph reuse for strided Q/K/V views."""
+    import torch_npu  # noqa: F401
+
+    device = get_device()
+    side, heads, dim = 14, 12, 64
+    sequence = side * side
+    qkv = torch.randn((1, sequence, 3, heads, dim), dtype=torch.bfloat16, device=device)
+    rel_h = torch.randn((1, sequence, heads, 16), dtype=torch.bfloat16, device=device)
+    rel_w = torch.randn_like(rel_h)
+    compiled = torch.compile(attn_rel_h_rel_w, backend='npugraph_ex', fullgraph=True, dynamic=False)
+    events = []
+
+    for round_idx in range(3):
+        if round_idx == 1:
+            qkv.copy_(torch.randn_like(qkv))
+            rel_h.copy_(torch.randn_like(rel_h))
+        elif round_idx == 2:
+            qkv = torch.randn_like(qkv)
+            rel_h = torch.randn_like(rel_h)
+            rel_w = torch.randn_like(rel_w)
+        q, k, v = qkv.unbind(2)
+        expected = attn_rel_h_rel_w_ref(q, k, v, rel_h, rel_w)
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]) as profile:
+            actual = compiled(q, k, v, rel_h, rel_w)
+            torch.npu.synchronize()
+        events.append({event.key: event.count for event in profile.key_averages()})
+        assert actual.shape == q.shape and actual.dtype == q.dtype and actual.device == q.device
+        torch.testing.assert_close(actual, expected, rtol=0.01, atol=0.005)
+        del actual
+
+    assert any(event.get('acl_graph_capture', 0) for event in events), events
+    assert any(event.get('acl_graph_replay', 0) for event in events[1:]), events
+    assert not any(event.get('fx_run_eagerly', 0) for event in events), events
+    torch.library.opcheck(
+        attn_rel_h_rel_w,
+        (q, k, v, rel_h, rel_w),
+        test_utils=('test_schema', 'test_faketensor'),
+    )

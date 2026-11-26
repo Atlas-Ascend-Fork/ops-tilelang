@@ -8,7 +8,7 @@ from tilelang.layout import make_ascend_compact_nz_layout
 
 
 @tilelang.jit(
-    out_idx=[5],
+    out_idx=None,
     target='ascend',
     pass_configs={
         tilelang.PassConfigKey.TIR_DISABLE_VECTORIZE: True,
