@@ -133,3 +133,87 @@ def test_per_block_cast_lossless_benchmark(benchmark_timer, benchmark_record, pa
         time_us=t_us,
         bandwidth_gbs=num_bytes / t_us / 1e3,
     )
+
+
+@pytest.mark.parametrize(
+    ('out_block', 'tma', 'packed'),
+    [
+        ((32, 32), False, False),
+        ((1, 128), True, True),
+        ((128, 128), False, True),
+    ],
+)
+@torch.inference_mode()
+def test_per_block_cast_lossless_compile(out_block, tma, packed):
+    from tests.testing.quant import call_quant_graph, check_quant_graph_replay, compile_quant_graph
+
+    compiled = compile_quant_graph(cann_ops_tilelang.per_block_cast_lossless)
+    kw = dict(use_tma_aligned_col_major_sf=tma, round_sf=True, use_packed_ue8m0=packed)
+    source = None
+    records = []
+    for step in range(3):
+        raw = clamp_abs_ratio(torch.randn((128, 256), dtype=torch.float32, device='npu'))
+        refreshed = cast(raw, 'e2m1', (1, 32), **kw)
+        if step == 1:
+            source[0].copy_(refreshed[0])
+            source[1].copy_(refreshed[1])
+        else:
+            source = refreshed
+        snapshots = tuple(value.clone() for value in source)
+        strides = tuple(value.stride() for value in source)
+        expected = cast_back(source, 'fp32', (1, 32))
+        reference = cann_ops_tilelang.per_block_cast_lossless(source, 'e4m3', (1, 32), out_block, **kw)
+        result, events = call_quant_graph(compiled, source, 'e4m3', (1, 32), out_block, **kw)
+        records.append(events)
+        assert_equal(cast_back(result, 'fp32', out_block), expected)
+        assert_equal(result[0].view(torch.uint8), reference[0].view(torch.uint8))
+        assert_equal(result[1], reference[1])
+        for actual, ref in zip(result, reference, strict=True):
+            assert actual.shape == ref.shape and actual.stride() == ref.stride()
+            assert actual.dtype == ref.dtype and actual.device == ref.device
+        for value, before, stride in zip(source, snapshots, strides, strict=True):
+            assert_equal(value, before, check_stride=False)
+            assert value.stride() == stride
+        del result, actual
+    check_quant_graph_replay(records)
+
+    torch.library.opcheck(
+        torch.ops.cann_ops_tilelang.per_block_cast_lossless.default,
+        (
+            source,
+            'e4m3',
+            [1, 32],
+            list(out_block),
+            tma,
+            True,
+            packed,
+        ),
+        test_utils=('test_schema', 'test_faketensor'),
+    )
+
+
+@torch.inference_mode()
+def test_per_block_cast_lossless_compile_config_changes(monkeypatch):
+    from tests.testing.quant import (
+        check_quant_config_result,
+        check_quant_config_updates,
+        compile_quant_graph,
+        quant_config_test_context,
+        record_quant_config_factory,
+    )
+
+    with quant_config_test_context(monkeypatch) as patch:
+        calls = record_quant_config_factory('per_block_cast_lossless.get_per_block_cast_lossless_kernel_asc', patch)
+        raw = torch.ones((128, 128), dtype=torch.float32, device='npu')
+        source = cast(raw, 'e2m1', (1, 32), round_sf=True)
+        block = (32, 32)
+        args = (source, 'e4m3', (1, 32), block, False, True, False)
+        compiled = compile_quant_graph(cann_ops_tilelang.per_block_cast_lossless)
+
+        def check(recapture):
+            # Lossless SF comes from input exponents, independently of clamp.
+            decoded = cast_back(source, 'fp32', (1, 32))
+            expected = cast(decoded, 'e4m3', block, round_sf=True)
+            return check_quant_config_result(compiled, args, expected, calls, recapture)
+
+        check_quant_config_updates(check, patch)

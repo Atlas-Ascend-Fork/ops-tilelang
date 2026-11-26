@@ -2,19 +2,20 @@
 # ruff: noqa: SIM108
 
 import math
+from typing import NamedTuple
 
 import tilelang
 from tilelang.ascend import language as T
 from tilelang.ascend.language import simd as S
 
-from cann_ops_tilelang.config import get_num_vector_cores
-from cann_ops_tilelang.quant.common import (
+from cann_ops_tilelang.utils import ceil_div
+
+from .common import (
     CastInputConfig,
     CastOutputConfig,
     get_packed_ue8m0_pack_factor,
     get_sf_shape,
 )
-from cann_ops_tilelang.utils import ceil_div
 
 
 def vector_mask(dtype, num_lanes):
@@ -60,8 +61,7 @@ def init_fp4_to_fp8_map(fp4_to_fp8_map_ub, invalid_exp_ub):
         S.vsts(invalid_exp_ub[0], S.vdup(0, T.uint16), assert_mask, dist='NORM_B16')
 
 
-@tilelang.jit()
-def get_per_block_cast_lossless_kernel_asc(hidden: int, in_config: CastInputConfig, out_config: CastOutputConfig):
+def _validate_lossless_kernel_config(hidden, in_config, out_config):
     assert in_config.dtype == T.float4_e2m1fn and out_config.dtype == T.float8_e4m3fn
     assert in_config.sf_block == (1, 32)
     assert out_config.sf_block in ((32, 32), (1, 128), (128, 128))
@@ -69,6 +69,21 @@ def get_per_block_cast_lossless_kernel_asc(hidden: int, in_config: CastInputConf
     assert not in_config.use_tma_aligned_col_major_sf or in_config.use_packed_ue8m0
     assert not out_config.use_tma_aligned_col_major_sf or out_config.use_packed_ue8m0
     assert hidden % out_config.sf_block[1] == 0
+
+
+class _LosslessTileConfig(NamedTuple):
+    block_m: int
+    block_k: int
+    num_k_subs: int
+    k_span: int
+    sf_per_pid: int
+    num_stages: int
+    out_sf_m: int
+    out_sf_k: int
+    is_tma_packed: bool
+
+
+def _get_lossless_tile_config(hidden, out_config) -> _LosslessTileConfig:
     is_tma_packed = out_config.use_tma_aligned_col_major_sf and out_config.use_packed_ue8m0
     # TMA+packed (col-major UE8M0) packs two out-sf values into one uint16, so each
     # persistent task must span 2*out_sf_k columns. For out_sf_k==128: per-row uses
@@ -113,18 +128,32 @@ def get_per_block_cast_lossless_kernel_asc(hidden: int, in_config: CastInputConf
         num_stages = 3
     else:
         num_stages = 2
-    num_per_channels = in_config.sf_block[1]
-    num_sf_cols_per_block = block_k // num_per_channels
-    vec_size = 64
-    assert vec_size * num_per_channels >= block_k
+    return _LosslessTileConfig(
+        block_m=block_m,
+        block_k=block_k,
+        num_k_subs=num_k_subs,
+        k_span=k_span,
+        sf_per_pid=sf_per_pid,
+        num_stages=num_stages,
+        out_sf_m=out_sf_m,
+        out_sf_k=out_sf_k,
+        is_tma_packed=is_tma_packed,
+    )
 
-    num_cores = get_num_vector_cores()
-    sf_dtype, in_pack_factor = get_sf_storage(in_config, T.uint32)
-    num_sf_load_cols = num_sf_cols_per_block // in_pack_factor
-    out_sf_dtype, out_pack_factor = get_sf_storage(out_config, T.float32)
-    # Output sf granularity is out_sf_k columns; the reduce pipeline works on
-    # 32-column slots and stores only one slot per out sf group.
-    num_out_sf_cols_per_block = block_k // out_sf_k
+
+def _get_lossless_sf_layout(
+    block_m,
+    num_out_sf_cols_per_block,
+    in_config,
+    out_config,
+    num_sf_load_cols,
+    in_pack_factor,
+    out_pack_factor,
+    vec_size,
+    num_k_subs,
+):
+    out_sf_m = out_config.sf_block[0]
+    is_tma_packed = out_config.use_tma_aligned_col_major_sf and out_config.use_packed_ue8m0
     if out_config.use_packed_ue8m0:
         num_sf_store_cols = ceil_div(num_out_sf_cols_per_block, out_pack_factor)
     else:
@@ -151,17 +180,53 @@ def get_per_block_cast_lossless_kernel_asc(hidden: int, in_config: CastInputConf
     else:
         num_batched_tiles = 1
         out_sf_shape_ub = (num_out_sf_rows, max(num_sf_store_cols, 8 * out_pack_factor) * out_pack_factor)
+    return num_sf_store_cols, num_out_sf_rows, sf_load_ub_shape, num_batched_tiles, out_sf_shape_ub
+
+
+def _get_lossless_sf_shape_and_stride(num_tokens, hidden, sf_config, stride_name):
+    shape = get_sf_shape((num_tokens, hidden), sf_config)
+    if sf_config.use_tma_aligned_col_major_sf:
+        stride = T.dynamic(stride_name)
+    else:
+        stride = shape[1]
+    return shape, stride
+
+
+@tilelang.jit()
+def get_per_block_cast_lossless_kernel_asc(
+    hidden: int, in_config: CastInputConfig, out_config: CastOutputConfig, num_cores: int
+):
+    _validate_lossless_kernel_config(hidden, in_config, out_config)
+    (block_m, block_k, num_k_subs, k_span, sf_per_pid, num_stages, out_sf_m, out_sf_k, is_tma_packed) = (
+        _get_lossless_tile_config(hidden, out_config)
+    )
+    num_per_channels = in_config.sf_block[1]
+    num_sf_cols_per_block = block_k // num_per_channels
+    vec_size = 64
+    assert vec_size * num_per_channels >= block_k
+
+    sf_dtype, in_pack_factor = get_sf_storage(in_config, T.uint32)
+    num_sf_load_cols = num_sf_cols_per_block // in_pack_factor
+    out_sf_dtype, out_pack_factor = get_sf_storage(out_config, T.float32)
+    # Output sf granularity is out_sf_k columns; the reduce pipeline works on
+    # 32-column slots and stores only one slot per out sf group.
+    num_out_sf_cols_per_block = block_k // out_sf_k
+    (num_sf_store_cols, num_out_sf_rows, sf_load_ub_shape, num_batched_tiles, out_sf_shape_ub) = (
+        _get_lossless_sf_layout(
+            block_m,
+            num_out_sf_cols_per_block,
+            in_config,
+            out_config,
+            num_sf_load_cols,
+            in_pack_factor,
+            out_pack_factor,
+            vec_size,
+            num_k_subs,
+        )
+    )
     num_tokens = T.dynamic('num_tokens')
-    in_sf_shape = get_sf_shape((num_tokens, hidden), in_config)
-    out_sf_shape = get_sf_shape((num_tokens, hidden), out_config)
-    if in_config.use_tma_aligned_col_major_sf:
-        in_sf_stride = T.dynamic('in_sf_stride')
-    else:
-        in_sf_stride = in_sf_shape[1]
-    if out_config.use_tma_aligned_col_major_sf:
-        out_sf_stride = T.dynamic('out_sf_stride')
-    else:
-        out_sf_stride = out_sf_shape[1]
+    in_sf_shape, in_sf_stride = _get_lossless_sf_shape_and_stride(num_tokens, hidden, in_config, 'in_sf_stride')
+    out_sf_shape, out_sf_stride = _get_lossless_sf_shape_and_stride(num_tokens, hidden, out_config, 'out_sf_stride')
 
     # For block_k <= 256 the quant tile always runs on 256-column tiles; x_ub/out_ub
     # are padded to 256 columns (zero-filled) so a single 256-column code path covers

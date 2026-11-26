@@ -1,9 +1,17 @@
+import importlib
 import logging
+import math
+from contextlib import contextmanager
+from functools import partial
 
+import pytest
 import torch
+from torch.utils._pytree import tree_leaves
 
+from cann_ops_tilelang import config
 from cann_ops_tilelang.quant.common import get_packed_ue8m0_pack_factor, unpack_from_e2m1fn_x2
 from cann_ops_tilelang.utils import align_up, ceil_div
+from tests.testing.numeric import assert_equal
 
 
 def quant_level_rank(xc: torch.Tensor, fmt: str) -> torch.Tensor:
@@ -97,3 +105,114 @@ def check_quant_graph_replay(records):
         raise AssertionError(f'The second call recaptured the NPU graph: {records}')
     if not all(record['fx_run_eagerly'] == 0 for record in records):
         raise AssertionError(f'Unexpected eager fallback: {records}')
+
+
+@contextmanager
+def quant_config_test_context(monkeypatch):
+    """Isolate tuning changes and refresh queries after restoring the environment."""
+    with monkeypatch.context() as patch:
+        patch.delenv('OPS_TILELANG_NUM_VECTOR_CORES', raising=False)
+        config.reset_runtime_config()
+        try:
+            yield patch
+        finally:
+            config.reset_runtime_config()
+            patch.undo()
+            config.clear_runtime_caches()
+
+
+def record_quant_config_factory(factory_path, patch):
+    """Record actual JIT arguments and returned kernels without replacing execution."""
+    module_name, factory_name = factory_path.rsplit('.', 1)
+    module = importlib.import_module('cann_ops_tilelang.quant.' + module_name)
+    factory = getattr(module, factory_name)
+    calls = []
+
+    def record(*args, **kwargs):
+        kernel = factory(*args, **kwargs)
+        cores = kwargs.get('n_cores', kwargs.get('num_cores'))
+        calls.append((cores, kwargs['out_config'].clamp_min_value, kernel))
+        return kernel
+
+    patch.setattr(module, factory_name, record)
+    return calls
+
+
+def _set_quant_test_vector_cap(patch, cap):
+    if cap is None:
+        patch.delenv('OPS_TILELANG_NUM_VECTOR_CORES')
+    else:
+        patch.setenv('OPS_TILELANG_NUM_VECTOR_CORES', str(cap))
+    config.clear_runtime_caches()
+
+
+def _quant_core_update_steps(patch):
+    half_ai = max(1, config.get_num_ai_cores() // 2)
+    vector_cores = config.get_num_vector_cores()
+    return [
+        (partial(config.set_num_ai_cores, half_ai), True),
+        (partial(config.set_num_ai_cores, half_ai), False),
+        (config.reset_runtime_config, True),
+        (partial(_set_quant_test_vector_cap, patch, max(1, vector_cores // 2)), True),
+        (partial(_set_quant_test_vector_cap, patch, max(1, vector_cores // 3)), True),
+        (partial(_set_quant_test_vector_cap, patch, None), True),
+    ]
+
+
+def check_quant_config_updates(check, patch):
+    """Exercise one compiled callable; only the configuration API invalidates it."""
+    core_steps = _quant_core_update_steps(patch)
+    baseline = check(True)
+    for update, recapture in core_steps:
+        update()
+        kernel = check(recapture)
+    if kernel is not baseline:
+        raise AssertionError('Restoring core settings did not reuse the original JIT kernel.')
+    with pytest.raises(ValueError):
+        config.set_num_ai_cores(0)
+    check(False)
+    clamp = config.get_amax_clamp_for_quant('e4m3')
+    clamp_steps = (
+        (partial(config.set_amax_clamp_for_quant, 'e4m3', clamp * 100), True),
+        (partial(config.set_amax_clamp_for_quant, 'e4m3', clamp * 100), False),
+        (config.reset_runtime_config, True),
+    )
+    for update, recapture in clamp_steps:
+        update()
+        kernel = check(recapture)
+    if kernel is not baseline:
+        raise AssertionError('Restoring clamp settings did not reuse the original JIT kernel.')
+    with pytest.raises(ValueError):
+        config.set_amax_clamp_for_quant('e4m3', float('nan'))
+    check(False)
+
+
+def _check_quant_config_capture(events, recapture):
+    if bool(events['acl_graph_capture']) is not recapture:
+        raise AssertionError(f'Unexpected graph capture after configuration update: {events}')
+    if events['acl_graph_replay'] <= 0 or events['fx_run_eagerly']:
+        raise AssertionError(f'Expected graph replay without eager fallback: {events}')
+
+
+def check_quant_config_result(compiled, args, expected, calls, recapture):
+    """Check capture, JIT configuration, independent results and read-only inputs."""
+    inputs = [value for value in tree_leaves(args) if isinstance(value, torch.Tensor)]
+    snapshots = [value.clone() for value in inputs]
+    previous_calls = len(calls)
+    result, events = call_quant_graph(compiled, *args)
+    _check_quant_config_capture(events, recapture)
+    if (len(calls) > previous_calls) is not recapture:
+        raise AssertionError('The JIT factory was not called exactly when a new capture was expected.')
+    cores, clamp, kernel = calls[-1]
+    if cores != config.get_num_vector_cores():
+        raise AssertionError(f'JIT factory used stale vector core count: {cores}')
+    if not math.isclose(clamp, config.get_amax_clamp_for_quant('e4m3'), rel_tol=0.0, abs_tol=0.0):
+        raise AssertionError(f'JIT factory used stale clamp: {clamp}')
+    outputs, references = tree_leaves(result), tree_leaves(expected)
+    if len(outputs) != len(references):
+        raise AssertionError('The compiled result has an unexpected output structure.')
+    for actual, reference in zip(outputs, references, strict=True):
+        assert_equal(actual, reference)
+    for value, snapshot in zip(inputs, snapshots, strict=True):
+        assert_equal(value, snapshot)
+    return kernel

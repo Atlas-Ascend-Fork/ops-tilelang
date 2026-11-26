@@ -7,7 +7,6 @@ import tilelang
 from tilelang.ascend import language as T
 from tilelang.ascend.language import simd as S
 
-from cann_ops_tilelang.config import get_num_vector_cores
 from cann_ops_tilelang.quant.common import (
     CastInputConfig,
     CastOutputConfig,
@@ -22,10 +21,10 @@ def get_per_block_cast_kernel_asc(
     hidden: int,
     in_config: CastInputConfig,
     out_config: CastOutputConfig,
+    n_cores: int,
     sf_only: bool = False,
     cast_only: bool = False,
 ):
-    n_cores = get_num_vector_cores()
     num_per_tokens, num_per_channels = out_config.sf_block
     assert num_per_tokens in (32, 128) and num_per_channels in (32, 128)
     assert out_config.dtype in (T.float4_e2m1fn, T.float8_e4m3fn)

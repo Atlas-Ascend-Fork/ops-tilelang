@@ -1,18 +1,24 @@
 import torch
 
-from cann_ops_tilelang.config import require_ascend, should_print_kernel_source
+from cann_ops_tilelang import config
 from cann_ops_tilelang.quant.common import (
     QuantTensor,
     alloc_scaling_factors,
     cast_epilogue,
     get_cast_input_and_config,
-    get_cast_output_config,
+    get_cast_output_config_impl,
     get_logical_hidden,
 )
 
 from .per_block_cast_lossless_kernel import get_per_block_cast_lossless_kernel_asc
 
 
+@torch.library.custom_op(
+    'cann_ops_tilelang::per_block_cast_lossless',
+    mutates_args=(),
+    schema='(Tensor[] x, str fmt, SymInt[] x_block_size, SymInt[] out_block_size, '
+    'bool use_tma_aligned_col_major_sf=False, bool round_sf=False, bool use_packed_ue8m0=False) -> (Tensor, Tensor)',
+)
 def per_block_cast_lossless(
     x: QuantTensor,
     fmt: str,
@@ -36,7 +42,11 @@ def per_block_cast_lossless(
     Returns:
         A tuple ``(out, out_sf)`` with FP8 output and sf-factor tensor.
     """
-    require_ascend()
+    options = [use_tma_aligned_col_major_sf, round_sf, use_packed_ue8m0]
+    return _per_block_cast_lossless_impl(x, fmt, x_block_size, out_block_size, options)
+
+
+def _validate_per_block_cast_lossless(x, fmt, x_block_size, out_block_size, options, clamp_min_value):
     x, x_sf, in_config = get_cast_input_and_config(x, x_block_size)
 
     assert fmt == 'e4m3' and x.dtype == torch.int8, 'lossless cast only supports e2m1 -> e4m3 input'
@@ -47,7 +57,7 @@ def per_block_cast_lossless(
     assert num_tokens % 128 == 0, f'lossless cast requires num_tokens % 128 == 0, got {num_tokens}'
     assert hidden % 32 == 0
 
-    out_config = get_cast_output_config(fmt, out_block_size, use_tma_aligned_col_major_sf, round_sf, use_packed_ue8m0)
+    out_config = get_cast_output_config_impl(fmt, out_block_size, *options, clamp_min_value)
 
     assert x_block_size == (1, 32), 'ascend lossless only supports in (1, 32)'
     assert out_block_size in (
@@ -55,15 +65,33 @@ def per_block_cast_lossless(
         (1, 128),
         (128, 128),
     ), 'ascend lossless only supports out (32, 32) / (1, 128) / (128, 128)'
+    return x, x_sf, in_config, out_config
+
+
+def _per_block_cast_lossless_impl(
+    x: list[torch.Tensor],
+    fmt: str,
+    x_block_size: list[int],
+    out_block_size: list[int],
+    options: list[bool],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    config.require_ascend()
+    clamp_min_value = config.get_amax_clamp_for_quant(fmt)
+    x, x_sf, in_config, out_config = _validate_per_block_cast_lossless(
+        tuple(x), fmt, tuple(x_block_size), tuple(out_block_size), options, clamp_min_value
+    )
+    num_tokens, physical_hidden = x.shape
+    hidden = get_logical_hidden(physical_hidden, x.dtype)
     # FP4 is stored as packed int8; reinterpret as the 2x-packed fp4 dtype the kernel expects.
     x = x.view(torch.float4_e2m1fn_x2)
     kernel = get_per_block_cast_lossless_kernel_asc(
         hidden=hidden,
         in_config=in_config,
         out_config=out_config,
+        num_cores=config.get_num_vector_cores(),
     )
 
-    if should_print_kernel_source():
+    if config.should_print_kernel_source():
         print(kernel.get_kernel_source())
 
     out = torch.empty((num_tokens, hidden), dtype=out_config.torch_dtype, device=x.device)
@@ -79,3 +107,17 @@ def per_block_cast_lossless(
     out_sf = cast_epilogue(out_sf, out_config)
 
     return out, out_sf
+
+
+@per_block_cast_lossless.register_fake
+def _per_block_cast_lossless_fake(
+    x, fmt, x_block_size, out_block_size, use_tma_aligned_col_major_sf=False, round_sf=False, use_packed_ue8m0=False
+):
+    options = (use_tma_aligned_col_major_sf, round_sf, use_packed_ue8m0)
+    x, _, _, out_config = _validate_per_block_cast_lossless(
+        tuple(x), fmt, tuple(x_block_size), tuple(out_block_size), options, None
+    )
+    shape = (x.shape[0], get_logical_hidden(x.shape[1], x.dtype))
+    out = torch.empty(shape, dtype=out_config.torch_dtype, device=x.device)
+    scale = cast_epilogue(alloc_scaling_factors(shape, out_config, device=x.device), out_config)
+    return out, scale
