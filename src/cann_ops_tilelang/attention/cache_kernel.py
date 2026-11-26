@@ -11,7 +11,6 @@ from cann_ops_tilelang.attention._simd import (
 from cann_ops_tilelang.attention._simd import (
     vstsx2_bf16 as _vstsx2_bf16,
 )
-from cann_ops_tilelang.config import get_num_vector_cores
 
 
 def _pack_prmt_selector(*sources: int) -> int:
@@ -46,6 +45,7 @@ _UE8M0_TO_BF16_EXP_SHIFT = 7
 def _store_kv_cache_tl_ascend(
     block_size: int,
     num_stages: int,
+    num_cores: int,
     full_tiles: bool = False,
     block_m: int = 64,
     store_lanes_per_row: int = 16,
@@ -58,7 +58,6 @@ def _store_kv_cache_tl_ascend(
     n = static_n if static_n > 0 else T.dynamic('n')
     num_blocks = static_num_blocks if static_num_blocks > 0 else T.dynamic('num_blocks')
     stride_kvcache_block = cache_block_stride
-    num_cores = get_num_vector_cores()
     num_groups = 8
     num_sf_slots = block_m * num_groups
     num_per32_slots = num_sf_slots * 2
@@ -197,14 +196,15 @@ def _store_kv_cache_tl_ascend(
 
 
 @tilelang.jit(out_idx=None, pass_configs={tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True})
-def _store_kv_cache_per32_tl_ascend(block_size: int, full_tiles: bool = False, block_m: int = 64) -> object:
+def _store_kv_cache_per32_tl_ascend(
+    block_size: int, num_cores: int, full_tiles: bool = False, block_m: int = 64
+) -> object:
     """Ascend fused per-32 FP8 quantization and paged-cache store."""
     n = T.dynamic('n')
     num_blocks = T.dynamic('num_blocks')
     stride_kvcache_block = T.dynamic('stride_kvcache_block')
     stride_kvcache_fp8 = T.dynamic('stride_kvcache_fp8')
     stride_kvcache_sf = T.dynamic('stride_kvcache_sf')
-    num_cores = get_num_vector_cores()
     num_stages = 2
     num_groups = 16
     num_scale_slots = block_m * num_groups
@@ -349,7 +349,9 @@ def _store_kv_cache_per32_tl_ascend(block_size: int, full_tiles: bool = False, b
 
 
 @tilelang.jit(out_idx=None, pass_configs={tilelang.PassConfigKey.TL_DISABLE_DATA_RACE_CHECK: True})
-def _load_kv_cache_tl_ascend(block_size: int, num_stages: int, full_tiles: bool = False, block_m: int = 32) -> object:
+def _load_kv_cache_tl_ascend(
+    block_size: int, num_stages: int, num_cores: int, full_tiles: bool = False, block_m: int = 32
+) -> object:
     """Ascend paged-cache load and per-64 FP8 dequantization."""
     is_pto = _is_pto_target()
     n = T.dynamic('n')
@@ -357,7 +359,6 @@ def _load_kv_cache_tl_ascend(block_size: int, num_stages: int, full_tiles: bool 
     stride_kvcache_block = T.dynamic('stride_kvcache_block')
     stride_kvcache_value = T.dynamic('stride_kvcache_value')
     stride_kvcache_sf = T.dynamic('stride_kvcache_sf')
-    num_cores = get_num_vector_cores()
     num_groups = 8
     value_bytes = 448 + 64 * 2
     block_size_is_power_of_two = block_size > 0 and block_size & block_size - 1 == 0
@@ -516,6 +517,7 @@ def _load_kv_cache_tl_ascend(block_size: int, num_stages: int, full_tiles: bool 
 @tilelang.jit(out_idx=None)
 def _load_kv_cache_per32_tl_ascend(
     block_size: int,
+    num_cores: int,
     full_tiles: bool = False,
     block_m: int = 32,
     cache_block_stride: int = 0,
@@ -537,7 +539,6 @@ def _load_kv_cache_per32_tl_ascend(
     stride_kvcache_block = cache_block_stride
     stride_kvcache_fp8 = 512
     stride_kvcache_sf = 16
-    num_cores = get_num_vector_cores()
     num_stages = 3
     num_groups = 16
     scale_qwords = num_groups // 8
@@ -868,10 +869,7 @@ def _load_kv_cache_per32_tl_ascend(
 
 @tilelang.jit(out_idx=None)
 def _store_index_kv_cache_quant_tl_ascend(
-    block_size: int,
-    quant_format: str,
-    stride_kvcache_data: int,
-    stride_kvcache_sf: int,
+    block_size: int, quant_format: str, stride_kvcache_data: int, stride_kvcache_sf: int, num_cores: int
 ) -> object:
     """Ascend AIV implementation shared by the three index-cache formats."""
     assert quant_format in ('fp8', 'mxfp8', 'fp4')
@@ -887,7 +885,6 @@ def _store_index_kv_cache_quant_tl_ascend(
     clamp_min = quant_max * (2**-126) if is_fp4 else 1e-4
     data_dtype = T.float4_e2m1fn if is_fp4 else T.float8_e4m3fn
     sf_dtype = T.uint8 if is_per32 else T.float32
-    num_cores = get_num_vector_cores()
     block_m = 128
     num_stages = 2
     data_bytes_per_row = 64 if is_fp4 else 128
@@ -1057,57 +1054,38 @@ def _store_index_kv_cache_quant_tl_ascend(
 
 
 def _store_index_kv_cache_tl_ascend(
-    block_size: int,
-    stride_kvcache_fp8: int,
-    stride_kvcache_sf: int,
+    block_size: int, stride_kvcache_fp8: int, stride_kvcache_sf: int, num_cores: int
 ) -> object:
     return _store_index_kv_cache_quant_tl_ascend(
-        block_size,
-        'fp8',
-        stride_kvcache_fp8,
-        stride_kvcache_sf,
+        block_size, 'fp8', stride_kvcache_fp8, stride_kvcache_sf, num_cores=num_cores
     )
 
 
 def _store_index_kv_cache_fp4_tl_ascend(
-    block_size: int,
-    stride_kvcache_fp4: int,
-    stride_kvcache_sf: int,
+    block_size: int, stride_kvcache_fp4: int, stride_kvcache_sf: int, num_cores: int
 ) -> object:
     return _store_index_kv_cache_quant_tl_ascend(
-        block_size,
-        'fp4',
-        stride_kvcache_fp4,
-        stride_kvcache_sf,
+        block_size, 'fp4', stride_kvcache_fp4, stride_kvcache_sf, num_cores=num_cores
     )
 
 
 def _store_index_kv_cache_fp8_per32_tl_ascend(
-    block_size: int,
-    stride_kvcache_fp8: int,
-    stride_kvcache_sf: int,
+    block_size: int, stride_kvcache_fp8: int, stride_kvcache_sf: int, num_cores: int
 ) -> object:
     return _store_index_kv_cache_quant_tl_ascend(
-        block_size,
-        'mxfp8',
-        stride_kvcache_fp8,
-        stride_kvcache_sf,
+        block_size, 'mxfp8', stride_kvcache_fp8, stride_kvcache_sf, num_cores=num_cores
     )
 
 
 @tilelang.jit(out_idx=None)
 def _load_index_kv_cache_quant_tl_ascend(
-    block_size: int,
-    data_bytes: int,
-    stride_kvcache_data: int,
-    stride_kvcache_sf: int,
+    block_size: int, data_bytes: int, stride_kvcache_data: int, stride_kvcache_sf: int, num_cores: int
 ) -> object:
     """Ascend AIV byte-gather shared by the three index-cache formats."""
     assert data_bytes in (64, 128)
     n = T.dynamic('n')
     num_blocks = T.dynamic('num_blocks')
     stride_kvcache_block = T.dynamic('stride_kvcache_block')
-    num_cores = get_num_vector_cores()
     block_m = 128
     num_stages = 2
     group_size = 2
@@ -1166,49 +1144,31 @@ def _load_index_kv_cache_quant_tl_ascend(
 
 
 def _load_index_kv_cache_tl_ascend(
-    block_size: int,
-    stride_kvcache_fp8: int,
-    stride_kvcache_sf: int,
+    block_size: int, stride_kvcache_fp8: int, stride_kvcache_sf: int, num_cores: int
 ) -> object:
     return _load_index_kv_cache_quant_tl_ascend(
-        block_size,
-        128,
-        stride_kvcache_fp8,
-        stride_kvcache_sf,
+        block_size, 128, stride_kvcache_fp8, stride_kvcache_sf, num_cores=num_cores
     )
 
 
 def _load_index_kv_cache_fp4_tl_ascend(
-    block_size: int,
-    stride_kvcache_fp4: int,
-    stride_kvcache_sf: int,
+    block_size: int, stride_kvcache_fp4: int, stride_kvcache_sf: int, num_cores: int
 ) -> object:
     return _load_index_kv_cache_quant_tl_ascend(
-        block_size,
-        64,
-        stride_kvcache_fp4,
-        stride_kvcache_sf,
+        block_size, 64, stride_kvcache_fp4, stride_kvcache_sf, num_cores=num_cores
     )
 
 
 def _load_index_kv_cache_fp8_per32_tl_ascend(
-    block_size: int,
-    stride_kvcache_fp8: int,
-    stride_kvcache_sf: int,
+    block_size: int, stride_kvcache_fp8: int, stride_kvcache_sf: int, num_cores: int
 ) -> object:
     return _load_index_kv_cache_quant_tl_ascend(
-        block_size,
-        128,
-        stride_kvcache_fp8,
-        stride_kvcache_sf,
+        block_size, 128, stride_kvcache_fp8, stride_kvcache_sf, num_cores=num_cores
     )
 
 
 @tilelang.jit(out_idx=None)
-def _store_kv_cache_llama_tl_ascend(
-    block_size: int,
-    element_per_token: int,
-) -> object:
+def _store_kv_cache_llama_tl_ascend(block_size: int, element_per_token: int, num_cores: int) -> object:
     """Ascend AIV SIMD paged-cache store for BF16 LLaMA KV cache."""
     n = T.dynamic('n')
     num_blocks = T.dynamic('num_blocks')
@@ -1216,7 +1176,6 @@ def _store_kv_cache_llama_tl_ascend(
     stride_kv_cache = T.dynamic('stride_kv_cache')
     stride_kv = T.dynamic('stride_kv')
 
-    num_cores = get_num_vector_cores()
     num_stages = 2
     ub_budget = 262144 - 32768
     row_bytes = element_per_token * 2 + 4
@@ -1281,10 +1240,7 @@ def _store_kv_cache_llama_tl_ascend(
 
 
 @tilelang.jit(out_idx=None)
-def _load_kv_cache_llama_tl_ascend(
-    block_size: int,
-    element_per_token: int,
-) -> object:
+def _load_kv_cache_llama_tl_ascend(block_size: int, element_per_token: int, num_cores: int) -> object:
     """Ascend paged-cache gather for BF16 LLaMA KV cache."""
     assert element_per_token % 128 == 0
 
@@ -1293,7 +1249,6 @@ def _load_kv_cache_llama_tl_ascend(
     stride_kvcache_block = T.dynamic('stride_kvcache_block')
     stride_kv_cache = T.dynamic('stride_kv_cache')
 
-    num_cores = get_num_vector_cores()
     blk = max(min(64, 192 * 1024 // (element_per_token * 2)), 1)
     num_stages = 2
 
