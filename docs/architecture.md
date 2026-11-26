@@ -166,7 +166,7 @@ OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 OPS_TILELANG_TEST_LEVEL=0 \
 
 - `src/cann_ops_tilelang/quant/`：公共 scaling-factor layout 和 FP8/FP4 类型系统；
 - `src/cann_ops_tilelang/moe/`：在现有 TopK、routing 和 expert mapping 基础上扩展 expert dispatch/combine；
-- `src/cann_ops_tilelang/norm/`：RMSNorm、LayerNorm 和融合残差；
+- `src/cann_ops_tilelang/normalization/`：RMSNorm、LayerNorm 和融合残差；
 - `src/cann_ops_tilelang/attention/`：RoPE、KV Cache、prefill/decode；
 - `tests/<operator>/benchmark/`：在算子测试目录内按测试文件存储 JSONL 性能基线。
 - `tests/<operator>/npu_mem_profiles/`：在算子测试目录内按测试文件存储 JSON 峰值显存画像。
