@@ -1,6 +1,9 @@
-"""High-performance Ascend operators implemented with TileLang."""
+# Copyright (c) 2026 ops-tilelang contributors
+# SPDX-License-Identifier: MIT
+# See LICENSE in the repository root for the full license text.
 
 __all__ = [
+    'cross_entropy_forward',
     'engram_fused_weight',
     'engram_gate_bwd',
     'engram_gate_fwd',
@@ -113,6 +116,7 @@ from .engram import (
     engram_sinkhorn_momentum_update,
     engram_sinkhorn_step,
 )
+from .loss import cross_entropy_forward
 from .mhc import (
     expand_to_mhc_backward,
     expand_to_mhc_forward,
