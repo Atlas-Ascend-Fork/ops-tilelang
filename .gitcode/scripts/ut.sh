@@ -44,7 +44,7 @@ fi
 
 source /root/miniconda3/etc/profile.d/conda.sh
 conda activate "${CONDA_ENV}"
-source /data/z00520135/weekly0922/cann/set_env.sh
+source /data/ops-tilelang-ci/legacy-20260923000324205/cann/set_env.sh
 
 cd "${ROOT_DIR}"
 
